@@ -1,5 +1,5 @@
 """This agent orchestrates the end-to-end recruitment process, from sourcing candidates to conducting interviews and making job offers.
-It usses database agents to manage candidate information, outreach managers to handle communication with candidates, and profile scraping agents to gather detailed candidate profiles from various sources.
+It uses database agents to manage candidate information, outreach managers to handle communication with candidates, and profile scraping agents to gather detailed candidate profiles from various sources.
 
 The RecruitmentExecutiveAgent is responsible for coordinating these sub-agents and ensuring a smooth and efficient recruitment workflow.
 It can be configured with different recruitment strategies, candidate sourcing methods, and communication channels to suit the
@@ -11,22 +11,15 @@ It can adapt its approach based on the requirements of each recruitment campaign
 The RecruitmentExecutiveAgent can be integrated with existing HR systems and recruitment platforms to streamline the hiring process and improve candidate experience.
 It can also generate reports and analytics on recruitment metrics, such as time-to-hire, candidate quality, and source effectiveness.
 
-
 Agent Identity
 
 | Attribute           | Value                                                                 |
-
 |---------------------|-----------------------------------------------------------------------|
-
 | Name            | Executive Recruitment Orchestrator                                    |
-
 | Primary Goal    | Break down user requests into atomic tasks and coordinate manager- and sub-agents to deliver complete, accurate recruitment outcomes. |
-
 | Tone            | Concise, professional, supportive.                                    |
-
 | Operating Hours | 24/7; scheduled triggers respect user-defined time zones.             |
 """
-
 
 # ---- Package imports ----
 from typing import List, Dict, Any, Optional, Sequence, Annotated
@@ -34,55 +27,46 @@ from datetime import datetime
 import json
 import logging
 import os
+import sys
 
 # LangGraph and LangChain for agent framework
 from langgraph.graph import START, END, StateGraph, MessagesState
 from langgraph.graph.message import add_messages
 from langchain.tools import tool
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_openai import ChatOpenAI
 from typing_extensions import TypedDict
 
-
 # Environment and configuration
 from dotenv import load_dotenv
+load_dotenv()
 
-# Custom imports from your project
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Setup path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import your tools and other agents
 from tools.get_projects import get_all_projects, convert_project_to_json
-from state.agent_state import AgentState  # Your custom agent state
+from state.agent_state import AgentState
 
+from prompts.recruitment_executive_agent_prompts import RecruitmentPrompts
 
-from recruitment_executive_agent_prompts import RecruitmentPrompts
-User_request_prompt = RecruitmentPrompts.user_request_prompt
+# NOTE: Circular import prevention - Import flows only when needed
+# from flows.recruitment_executive_flow import RecruitmentExecutiveFlow
 
-# Import recruitment_executive_flow to create the workflow
-from flows.recruitment_executive_flow import RecruitmentExecutiveFlow
+# agents imports
+try:
+    from agents.sourcing_manager_unified import UnifiedSourcingManager
+except ImportError:
+    UnifiedSourcingManager = None
 
-# agents imports (when implemented)
-from agents.scourcing_manager import SourcingManagerAgent
-from agents.outreach_manager import OutreachManagerAgent  
-from agents.database_agent import DatabaseAgent
+try:
+    from agents.database_agent import DatabaseAgent
+except ImportError:
+    DatabaseAgent = None
 
 # Logging
-import logging
-from datetime import datetime
-
-logger = logging.getLogger('RecruitmentExecutiveAgent') 
+logger = logging.getLogger('RecruitmentExecutiveAgent')
 logging.basicConfig(level=logging.INFO)
-
-
-# Load environment variables
-load_dotenv()
-
-# Logging
-import logging
-
-# Load environment variables
-load_dotenv()
 
 # ---- Configuration ----
 def get_ai_config():
@@ -90,40 +74,76 @@ def get_ai_config():
     return {
         'openai_api_key': os.getenv('OPENAI_API_KEY'),
         'model': os.getenv('OPENAI_MODEL', 'gpt-4'),
-        'temperature': float(os.getenv('AI_TEMPERATURE', '0.1')),
-        'max_tokens': int(os.getenv('AI_MAX_TOKENS', '1000'))
+        'temperature': float(os.getenv('OPENAI_TEMPERATURE', '0.3')),
+        'max_tokens': int(os.getenv('OPENAI_MAX_TOKENS', '2000'))
     }
 
-
-#  ---- Recruitment Executive Agent State ----
-
+# ---- Recruitment Executive Agent State ----
 class RecruitmentExecutiveState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], add_messages] | None
-    user_request: Annotated[list, add_messages] | None
-    current_projects: List[Dict[str, Any], add_messages] | None
-    active_campaigns: List[Dict[str, Any], add_messages] | None
-    candidate_pipeline: Dict[str, List[Dict]]
+    """State for the Recruitment Executive Agent workflow."""
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    user_request: str
+    current_projects: List[Dict[str, Any]]
+    active_campaigns: List[Dict[str, Any]]
+    candidate_pipeline: Dict[str, List[Dict[str, Any]]]
     recruitment_strategy: str
     next_action: str
-    reasoning: Optional[List[str]] | None
-    human_review_required: Optional[bool] | None
-    current_stage: Optional[str] | None 
+    reasoning: Optional[List[str]]
+    human_review_required: Optional[bool]
+    current_stage: Optional[str]
+    processing_result: Optional[Dict[str, Any]]
+    parsed_requirements: Optional[Dict[str, Any]]
+    project_creation_result: Optional[Dict[str, Any]]
 
 
 # ---- Example user request ----
-global user_request
-user_request = "Find and recruit a senior data scientist with expertise in machine learning and Python for our Amsterdam office."
+EXAMPLE_USER_REQUEST = "Find and recruit a senior data scientist with expertise in machine learning and Python for our Amsterdam office."
 
-
-#  ---- agent class structure ----
+# ---- Agent class structure ----
 class RecruitmentExecutiveAgent:
     """The Recruitment Executive Agent orchestrates the recruitment process."""
 
-    def __init__(self, state: RecruitmentExecutiveState, config: Dict[str, Any]):
-        self.state = state
-        self.config = config
+    def __init__(self, state: Optional[RecruitmentExecutiveState] = None, config: Optional[Dict[str, Any]] = None):
+        self.state = state or {
+            'messages': [],
+            'user_request': '',
+            'current_projects': [],
+            'active_campaigns': [],
+            'candidate_pipeline': {},
+            'recruitment_strategy': '',
+            'next_action': '',
+            'reasoning': None,
+            'human_review_required': None,
+            'current_stage': None,
+            'processing_result': None,
+            'parsed_requirements': None,
+            'project_creation_result': None
+        }
+        self.config = config or get_ai_config()
         self.logger = logging.getLogger('RecruitmentExecutiveAgent')
         self.logger.setLevel(logging.DEBUG)
+        
+        # Lazy load managers to avoid circular imports
+        self.sourcing_manager = None
+        self.database_agent = None
+        self._initialize_managers()
+    
+    def _initialize_managers(self):
+        """Initialize manager agents if available."""
+        try:
+            if UnifiedSourcingManager:
+                self.sourcing_manager = UnifiedSourcingManager(
+                    model_name=self.config.get('model', 'gpt-4'),
+                    temperature=self.config.get('temperature', 0.3)
+                )
+        except Exception as e:
+            self.logger.warning(f"Could not initialize SourcingManager: {e}")
+        
+        try:
+            if DatabaseAgent:
+                self.database_agent = DatabaseAgent()
+        except Exception as e:
+            self.logger.warning(f"Could not initialize DatabaseAgent: {e}")
 
 
     def process_request_node(self, state: RecruitmentExecutiveState) -> RecruitmentExecutiveState:
@@ -141,15 +161,15 @@ class RecruitmentExecutiveAgent:
         Returns:
             Updated state with processed request information
         """
-        self.logger.info("🔄 Processing incoming request...")
+        self.logger.info("Processing incoming request...")
         
         try:
             # Extract request information from state
             request_source = self._identify_request_source(state)
             request_data = self._extract_request_data(state)
             
-            self.logger.info(f"📥 Request source: {request_source}")
-            self.logger.info(f"📋 Request type: {request_data.get('type', 'unknown')}")
+            self.logger.info(f"Request source: {request_source}")
+            self.logger.info(f"Request type: {request_data.get('type', 'unknown')}")
             
             # Process based on request source
             if request_source == "frontend_user":
@@ -160,18 +180,75 @@ class RecruitmentExecutiveAgent:
                 result = self._handle_unknown_request(state, request_data)
             
             # Update state with processing results
-            state.update(result)
-            state["current_stage"] = "request_processed"
-            state["next_action"] = "analyze_request"
+            state['processing_result'] = result
+            state['current_stage'] = 'request_processed'
+            state['next_action'] = 'analyze_request'
             
-            self.logger.info("✅ Request processing completed")
+            self.logger.info("Request processing completed")
             return state
             
         except Exception as e:
-            self.logger.error(f"❌ Error processing request: {e}")
-            state["next_action"] = "error"
-            state["reasoning"] = [f"Request processing failed: {str(e)}"]
+            self.logger.error(f"Error processing request: {e}")
+            state['next_action'] = 'error'
+            state['reasoning'] = [f"Request processing failed: {str(e)}"]
             return state
+    
+    def _identify_request_source(self, state: RecruitmentExecutiveState) -> str:
+        """Identify whether request comes from frontend user or LinkedIn API."""
+        user_request = state.get('user_request', '')
+        
+        if not user_request:
+            return 'unknown'
+        
+        # Check for LinkedIn API indicators
+        linkedin_indicators = ['linkedin_search_id', 'saved_search', 'api_created', 'project_id', 'unipile']
+        if any(indicator in str(user_request).lower() for indicator in linkedin_indicators):
+            return 'linkedin_api'
+        
+        # Check for user request indicators
+        return 'frontend_user'
+    
+    def _extract_request_data(self, state: RecruitmentExecutiveState) -> Dict[str, Any]:
+        """Extract and structure request data from state."""
+        return {
+            'type': 'user_request',
+            'request': state.get('user_request', ''),
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    def _process_user_request(self, state: RecruitmentExecutiveState, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a frontend user recruitment request."""
+        return {
+            'status': 'processed',
+            'request_type': 'user_recruitment_request',
+            'parsed_data': request_data
+        }
+    
+    def _process_linkedin_project(self, state: RecruitmentExecutiveState, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a LinkedIn API project creation."""
+        return {
+            'status': 'processed',
+            'request_type': 'linkedin_project_creation',
+            'parsed_data': request_data
+        }
+    
+    def _handle_unknown_request(self, state: RecruitmentExecutiveState, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle requests of unknown type."""
+        return {
+            'status': 'unknown_request',
+            'request_type': 'unknown',
+            'parsed_data': request_data
+        }
+    
+    async def execute(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute recruitment workflow."""
+        self.state['user_request'] = request_data.get('request', '')
+        result = self.process_request_node(self.state)
+        return {
+            'success': True,
+            'result': result.get('processing_result', {}),
+            'stage': result.get('current_stage')
+        }
     
     def _identify_request_source(self, state: RecruitmentExecutiveState) -> str:
         """Identify whether request comes from frontend user or LinkedIn API.
@@ -1480,7 +1557,7 @@ class RecruitmentExecutiveAgent:
         if pipeline_health in ["excellent", "good"] and total_responded > 0:
             return True
         if pipeline_health == "poor":
-        return True
+           return True
     
     def generate_report_node(self, state: RecruitmentExecutiveState) -> RecruitmentExecutiveState:
         """Generate comprehensive recruitment campaign report.
@@ -1812,7 +1889,7 @@ class RecruitmentExecutiveAgent:
                 "partial_state": {}
             }
 
-# Factory function for easy import
-def create_recruitment_flow(config: Dict[str, Any] = None) -> RecruitmentExecutiveFlow:
-    """Create and return a configured RecruitmentExecutiveFlow."""
-    return RecruitmentExecutiveFlow(config)
+# # Factory function for easy import
+# def create_recruitment_flow(config: Dict[str, Any] = None) -> RecruitmentExecutiveFlow:
+#     """Create and return a configured RecruitmentExecutiveFlow."""
+#     return RecruitmentExecutiveFlow(config)

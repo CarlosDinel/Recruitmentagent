@@ -8,7 +8,7 @@ import sys
 import os
 sys.path.append('/Users/carlosalmeida/development/Recruitment-agent')
 
-from config import get_config, validate_config, print_config_summary
+from config.config import get_config, validate_config, print_config_summary
 
 def check_production_readiness():
     """Check if the system is ready for production deployment"""

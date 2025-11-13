@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+recruitment_agent.log
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Cache
+*.pyc
+*.pyo
+*.pyd
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+mongodb_exploration_results.json
+current_projects.json
+*.pdf
+offerte_*.pdf

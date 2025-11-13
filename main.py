@@ -26,7 +26,7 @@ try:
     from agents.recruitment_executive import RecruitmentExecutiveAgent, RecruitmentExecutiveState
     from agents.sourcing_manager_unified import UnifiedSourcingManager
     from agents.database_agent import DatabaseAgent
-    from tools.get_projects import get_all_projects, get_projects_list
+    from tools.get_projects import get_all_projects
     from prompts.recruitment_executive_agent_prompts import RecruitmentPrompts
     from config.config import AppConfig
 except ImportError as e:
