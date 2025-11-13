@@ -1,0 +1,91 @@
+# Core LangGraph framework
+langgraph>=0.1.0
+langchain>=0.1.0
+langchain-community>=0.0.20
+langchain-openai>=0.1.0
+langchain-anthropic>=0.1.0
+
+# Type hints and utilities
+typing-extensions>=4.5.0
+
+# AI/ML libraries
+openai>=1.0.0
+anthropic>=0.7.0
+
+# Database and vector store
+chromadb>=0.4.0
+pinecone-client>=2.2.0
+weaviate-client>=4.0.0
+faiss-cpu>=1.7.0
+pymongo>=4.6.0
+redis>=5.0.0
+
+# Web scraping and automation
+selenium>=4.15.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+scrapy>=2.11.0
+playwright>=1.40.0
+
+# LinkedIn scraping (alternative libraries)
+linkedin-api>=2.0.0
+selenium-wire>=5.1.0
+
+# Email functionality
+smtplib2>=0.2.0
+email-validator>=2.1.0
+yagmail>=0.15.0
+
+# Calendar integration
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.1.0
+caldav>=1.3.0
+
+# Data processing and analysis
+pandas>=2.0.0
+numpy>=1.24.0
+python-dateutil>=2.8.0
+
+# PDF generation
+fpdf>=1.7.2
+reportlab>=4.0.0
+
+# Configuration and environment
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Logging and monitoring
+loguru>=0.7.0
+structlog>=23.1.0
+
+# HTTP and API clients
+httpx>=0.25.0
+aiohttp>=3.8.0
+
+# Text processing and NLP
+nltk>=3.8.0
+spacy>=3.7.0
+transformers>=4.30.0
+
+# Data storage formats
+jsonlines>=4.0.0
+pyyaml>=6.0.0
+
+# Security
+python-jose>=3.3.0
+bcrypt>=4.0.1
+
+# Development and testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0
+
+# Optional: For enhanced functionality
+celery>=5.3.0
+streamlit>=1.28.0  # For potential UI
+fastapi>=0.104.0   # For potential API endpoints
+uvicorn>=0.24.0    # ASGI server
