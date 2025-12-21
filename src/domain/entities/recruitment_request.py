@@ -24,12 +24,14 @@ class RecruitmentRequest:
     
     # Requirements
     required_skills: SkillSet
+    
+    # Request Source (required field, must come before optional fields)
+    source: str  # 'frontend_user' or 'linkedin_api'
+    
+    # Optional fields (must come after required fields)
     location: Optional[str] = None
     experience_required: Optional[int] = None
     education_required: Optional[str] = None
-    
-    # Request Source
-    source: str  # 'frontend_user' or 'linkedin_api'
     source_id: Optional[str] = None  # LinkedIn project ID if from API
     
     # User Information (if from frontend)

@@ -38,8 +38,29 @@ class DatabaseTools:
     """Class encapsulating database agent tools."""
 
     def __init__(self):
+        # Try MONGO_URI first, then build from individual components
         uri = os.getenv('MONGO_URI')
-        self.client = pymongo.MongoClient(uri)
+        
+        if not uri:
+            # Build URI from individual components
+            username = os.getenv('MONGO_USERNAME')
+            password = os.getenv('MONGO_PASSWORD')
+            host = os.getenv('MONGO_HOST')
+            database = os.getenv('MONGO_DATABASE') or os.getenv('MONGO_DB') or 'test_db'
+            
+            if username and password and host:
+                # MongoDB Atlas connection string
+                uri = f"mongodb+srv://{username}:{password}@{host}/{database}?retryWrites=true&w=majority"
+            else:
+                # Fallback to localhost if no config
+                uri = f"mongodb://localhost:27017/{database}"
+                self.logger = logging.getLogger(__name__)
+                self.logger.warning("MongoDB config incomplete, using localhost fallback")
+        
+        if not uri:
+            raise ValueError("MongoDB URI not configured. Set MONGO_URI or MONGO_USERNAME/PASSWORD/HOST")
+        
+        self.client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=10000)
         # Fix: Use MONGO_DATABASE instead of MONGO_DB
         db_name = os.getenv('MONGO_DATABASE') or os.getenv('MONGO_DB') or 'test_db'
         self.db = self.client[db_name]
@@ -172,10 +193,34 @@ class DatabaseTools:
     @tool
     def get_projects(query: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Retrieve projects from the database based on a query."""
-        client = pymongo.MongoClient(os.getenv("MONGODB_URI"))
-        db = client[os.getenv("MONGODB_DB")]
-        projects = list(db.projects.find(query))
-        return projects
+        # Direct database access to avoid recursion
+        import os
+        username = os.getenv('MONGO_USERNAME')
+        password = os.getenv('MONGO_PASSWORD')
+        host = os.getenv('MONGO_HOST')
+        db_name = os.getenv('MONGO_DATABASE') or 'test_db'
+        
+        if not all([username, password, host, db_name]):
+            return []
+        
+        uri = f"mongodb+srv://{username}:{password}@{host}/{db_name}?retryWrites=true&w=majority"
+        client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=10000)
+        db = client[db_name]
+        
+        try:
+            if query is None:
+                query = {}
+            projects = list(db.projects.find(query))
+            # Convert ObjectId to string for JSON serialization
+            for project in projects:
+                if "_id" in project:
+                    project["_id"] = str(project["_id"])
+            return projects
+        except Exception as e:
+            print(f"Error retrieving projects: {e}")
+            return []
+        finally:
+            client.close()
     
     @tool
     def save_candidate(candidate_data: Dict[str, Any]) -> Dict[str, Any]:

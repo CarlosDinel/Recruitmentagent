@@ -1,16 +1,61 @@
 """
-This unified agent combines all best features from the previous versions:
-- Complete workflow orchestration (from scourcing_manager.py)
-- Advanced parsing with CandidateRecord objects (from scourcing_manager_complete.py)  
-- AI-powered decision making with retry logic (from scourcing_manager_extended.py)
-- Database integration with LinkedIn URL unique key
-- Production-ready error handling and recovery mechanisms
-- SYNCHRONOUS implementation for compatibility with existing agents
+Unified Sourcing Manager - Intelligent Candidate Discovery Pipeline
 
-The Sourcing Manager coordinates specialized sub-agents to deliver high-quality candidates:
-1. CandidateSearchingAgent - LinkedIn search and basic enrichment
-2. CandidateEvaluationAgent - Suitability assessment and decision making  
-3. ProfileScrapingAgent - Detailed profile enrichment (when available)
+This module implements the UnifiedSourcingManager, a production-ready orchestrator
+for the candidate sourcing pipeline. It coordinates specialized sub-agents to
+discover, evaluate, and enrich candidate profiles with AI-powered decision making.
+
+Architecture:
+============
+
+    UnifiedSourcingManager (Orchestrator)
+    ├── Phase 1: Candidate Search
+    │   └── CandidateSearchingAgent
+    │       └── LinkedIn API (via Unipile)
+    ├── Phase 2: Candidate Evaluation
+    │   └── CandidateEvaluationAgent
+    │       └── AI-Powered Suitability Assessment
+    ├── Phase 3: Profile Enrichment
+    │   └── ProfileScrapingAgent (optional)
+    │       └── Deep Profile Analysis
+    └── Phase 4: Database Storage
+        └── DatabaseAgent (monopoly pattern)
+
+Workflow Stages:
+===============
+
+1. **INITIALIZING**: Setup and validation
+2. **SEARCHING**: LinkedIn candidate search
+3. **EVALUATING**: AI-powered suitability assessment
+4. **ENRICHING**: Optional deep profile enrichment
+5. **FINALIZING**: Results compilation and storage
+6. **COMPLETED**: Pipeline complete
+7. **ERROR**: Error state (with recovery)
+
+Design Patterns:
+===============
+
+1. **Pipeline Pattern**: Sequential processing stages
+2. **Strategy Pattern**: Different search/evaluation strategies
+3. **AI Decision Making**: Intelligent workflow adjustments
+4. **Retry Logic**: Exponential backoff for API failures
+5. **Quality Gates**: Threshold-based filtering
+
+Features:
+=========
+
+- Multi-phase candidate discovery pipeline
+- AI-powered suitability evaluation
+- Intelligent retry logic with exponential backoff
+- Quality threshold enforcement
+- Database integration (via DatabaseAgent)
+- Comprehensive error handling
+- Workflow state tracking
+- Performance metrics collection
+
+Author: Senior Development Team
+Version: 1.0.0
+License: MIT
 """
 
 # ---- Package imports ----
@@ -42,7 +87,56 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CandidateRecord:
-    """Enhanced candidate record with comprehensive metadata"""
+    """
+    Enhanced candidate record with comprehensive metadata.
+    
+    This dataclass represents a candidate throughout the sourcing pipeline,
+    tracking their journey from initial discovery through evaluation and
+    enrichment. It maintains metadata at each stage for auditability and
+    quality assessment.
+    
+    Attributes:
+        candidate_id: Unique identifier for the candidate
+        linkedin_url: LinkedIn profile URL (used as unique key)
+        name: Candidate's full name
+        title: Current job title
+        company: Current company name
+        location: Geographic location
+        experience_years: Years of professional experience
+        skills: List of technical skills
+        education: List of education entries (dicts with institution, degree, etc.)
+        contact_info: Dictionary with contact information
+        search_score: Relevance score from search (0.0-1.0)
+        search_source: Source of the candidate (default: "linkedin")
+        search_timestamp: When candidate was discovered
+        suitability_status: Evaluation result ("suitable", "maybe", "unsuitable", "unknown")
+        suitability_score: Suitability score (0.0-100.0)
+        suitability_reasoning: AI-generated reasoning for suitability
+        evaluation_timestamp: When evaluation was performed
+        profile_enriched: Whether deep enrichment was performed
+        enrichment_timestamp: When enrichment was performed
+        enrichment_details: Additional enriched data
+    
+    Example:
+        >>> candidate = CandidateRecord(
+        ...     candidate_id="c123",
+        ...     linkedin_url="https://linkedin.com/in/johndoe",
+        ...     name="John Doe",
+        ...     title="Senior Python Developer",
+        ...     company="Tech Corp",
+        ...     location="Amsterdam",
+        ...     experience_years=7,
+        ...     skills=["Python", "Django", "AWS"],
+        ...     suitability_score=85.0,
+        ...     suitability_status="suitable"
+        ... )
+        >>> candidate_dict = candidate.dict()
+    
+    Note:
+        The linkedin_url serves as a unique key for deduplication in the database.
+        All timestamps are stored as datetime objects and converted to ISO format
+        in the dict() method for JSON serialization.
+    """
     candidate_id: str
     linkedin_url: str
     name: str
@@ -98,7 +192,38 @@ class CandidateRecord:
 
 @dataclass
 class SourcingManagerDecision:
-    """AI-powered workflow decision with reasoning"""
+    """
+    AI-powered workflow decision with reasoning.
+    
+    Represents a decision made by the AI decision-making system during the
+    sourcing workflow. Used to dynamically adjust the pipeline based on
+    current state and quality metrics.
+    
+    Attributes:
+        action: Decision action type. One of:
+            - "continue": Proceed to next phase
+            - "retry": Retry current phase with adjustments
+            - "adjust": Modify search criteria and retry
+            - "escalate": Require human intervention
+            - "complete": Pipeline complete, sufficient candidates found
+        reasoning: Human-readable explanation of the decision
+        confidence: Confidence score (0.0-1.0) in the decision
+        next_steps: List of recommended next steps
+        adjustments: Dictionary of parameter adjustments to apply
+    
+    Example:
+        >>> decision = SourcingManagerDecision(
+        ...     action="retry",
+        ...     reasoning="Low candidate quality, adjusting search criteria",
+        ...     confidence=0.85,
+        ...     next_steps=["Broaden location criteria", "Reduce experience requirement"],
+        ...     adjustments={"location": "Netherlands", "min_experience": 3}
+        ... )
+    
+    Note:
+        This class is used by the AI decision-making system to provide
+        transparent, auditable workflow adjustments.
+    """
     action: str  # continue, retry, adjust, escalate, complete
     reasoning: str
     confidence: float
@@ -107,7 +232,30 @@ class SourcingManagerDecision:
 
 
 class WorkflowStage(Enum):
-    """Workflow stages for better tracking"""
+    """
+    Workflow stages for pipeline state tracking.
+    
+    Enumeration of all possible stages in the candidate sourcing pipeline.
+    Used for state management, logging, and workflow routing.
+    
+    Values:
+        INITIALIZING: Initial setup and validation phase
+        SEARCHING: Active candidate search phase
+        EVALUATING: Candidate suitability evaluation phase
+        ENRICHING: Optional deep profile enrichment phase
+        FINALIZING: Results compilation and storage phase
+        COMPLETED: Pipeline successfully completed
+        ERROR: Error state (with recovery mechanisms)
+    
+    Example:
+        >>> stage = WorkflowStage.SEARCHING
+        >>> print(stage.value)
+        'searching'
+    
+    Note:
+        The pipeline can transition between stages based on AI decisions
+        and quality thresholds. The ERROR state triggers recovery mechanisms.
+    """
     INITIALIZING = "initializing"
     SEARCHING = "searching"
     EVALUATING = "evaluating"
@@ -121,13 +269,102 @@ class WorkflowStage(Enum):
 
 class UnifiedSourcingManager:
     """
-    Complete production-ready orchestrator for the candidate sourcing pipeline.
-    Combines all advanced features: AI decision making, database integration, 
-    enhanced parsing, and intelligent workflow orchestration.
+    Production-ready orchestrator for the candidate sourcing pipeline.
+    
+    The UnifiedSourcingManager coordinates a multi-phase candidate discovery
+    pipeline, from initial LinkedIn search through AI-powered evaluation and
+    optional profile enrichment. It implements intelligent decision-making,
+    retry logic, and quality threshold enforcement.
+    
+    Responsibilities:
+        - Orchestrate candidate search via LinkedIn API (Unipile)
+        - Coordinate AI-powered suitability evaluation
+        - Manage optional profile enrichment
+        - Enforce quality thresholds
+        - Handle errors with retry logic
+        - Store candidates via DatabaseAgent
+    
+    Design:
+        - Pipeline pattern with quality gates
+        - AI-powered workflow adjustments
+        - Exponential backoff retry logic
+        - Comprehensive error handling
+        - Database integration (monopoly pattern)
+    
+    Attributes:
+        config: Application configuration (AppConfig)
+        model_name: AI model name for evaluation
+        temperature: AI model temperature
+        search_agent: CandidateSearchingAgent instance
+        evaluation_agent: CandidateEvaluationAgent instance
+        database_agent: DatabaseAgent instance
+        scraping_agent: ProfileScrapingAgent instance (optional)
+        max_retries: Maximum retry attempts for API calls
+        timeout_minutes: Pipeline timeout in minutes
+        min_candidates_threshold: Minimum candidates to find
+        min_suitable_threshold: Minimum suitable candidates
+    
+    Example:
+        >>> manager = UnifiedSourcingManager()
+        >>> 
+        >>> requirements = {
+        ...     'position': 'Python Developer',
+        ...     'skills': ['Python', 'Django'],
+        ...     'location': 'Amsterdam'
+        ... }
+        >>> 
+        >>> results = manager.process_sourcing_request(
+        ...     project_requirements=requirements,
+        ...     job_description='Senior Python Developer role...',
+        ...     project_id='proj123',
+        ...     target_count=50
+        ... )
+        >>> 
+        >>> print(f"Found {results['summary']['total_suitable']} suitable candidates")
+    
+    Note:
+        Configuration is loaded from .env file via AppConfig. The manager
+        uses synchronous operations for compatibility with existing agents.
     """
     
-    def __init__(self, model_name: str = None, temperature: float = None, config: AppConfig = None):
-        """Initialize the Unified Sourcing Manager with configuration from .env."""
+    def __init__(
+        self, 
+        model_name: Optional[str] = None, 
+        temperature: Optional[float] = None, 
+        config: Optional[AppConfig] = None
+    ) -> None:
+        """
+        Initialize the Unified Sourcing Manager.
+        
+        Sets up the manager with configuration from environment variables or
+        provided parameters. Initializes sub-agents and configures pipeline
+        parameters.
+        
+        Args:
+            model_name: Optional AI model name. If None, uses config default.
+            temperature: Optional AI temperature. If None, uses config default.
+            config: Optional AppConfig instance. If None, loads from environment.
+        
+        Side Effects:
+            - Initializes CandidateSearchingAgent
+            - Initializes CandidateEvaluationAgent
+            - Initializes DatabaseAgent
+            - Loads configuration from .env
+        
+        Example:
+            >>> # Default initialization (uses .env config)
+            >>> manager = UnifiedSourcingManager()
+            >>> 
+            >>> # With custom model
+            >>> manager = UnifiedSourcingManager(
+            ...     model_name='gpt-4-turbo',
+            ...     temperature=0.2
+            ... )
+        
+        Note:
+            All configuration values can be overridden via environment variables
+            in the .env file. See config.py for available options.
+        """
         
         # Load configuration from .env or use provided config
         self.config = config or get_config()

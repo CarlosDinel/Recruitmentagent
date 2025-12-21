@@ -66,7 +66,7 @@ caldav>=1.3.9
 # CONFIGURATION & VALIDATION
 # ============================================================================
 python-dotenv>=1.0.0
-pydantic>=2.5.0
+# Note: pydantic is included below with [email] extras (line 105)
 pydantic-settings>=2.1.0
 python-decouple>=3.8
 
@@ -135,7 +135,7 @@ fpdf2>=2.7.7
 # ============================================================================
 # ASYNC & CONCURRENCY
 # ============================================================================
-asyncio>=3.4.3
+# Note: asyncio is part of Python standard library (since 3.4), no need to install
 aiofiles>=23.2.1
 tenacity>=8.2.3  # Retry logic
 
@@ -187,4 +187,3 @@ python-dotenv-vault>=0.6.0
 # DEPENDENCY INJECTION & PATTERNS
 # ============================================================================
 injector>=0.21.0  # Dependency injection for Clean Architecture
-python-dependency-injector>=4.41.0  # Alternative DI container

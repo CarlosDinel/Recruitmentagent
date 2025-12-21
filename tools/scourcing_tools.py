@@ -13,6 +13,14 @@ logger = logging.getLogger(__name__)
 UNIPILE_BASE_URL = "https://api.unipile.com/v1"
 # Note: API key should be loaded from environment variables in production
 
+# Try to use new LinkedIn API client if available
+try:
+    from src.infrastructure.external_services.linkedin.linkedin_api_client import LinkedInAPIClient
+    _LINKEDIN_CLIENT_AVAILABLE = True
+except ImportError:
+    _LINKEDIN_CLIENT_AVAILABLE = False
+    logger.warning("New LinkedIn API client not available, using fallback implementation")
+
 # ---- Tools ----
 
 @tool
@@ -197,8 +205,8 @@ def _search_with_cursor_pagination(search_criteria: Dict[str, Any], max_results:
             if search_criteria.get("filters"):
                 search_params.update(search_criteria["filters"])
             
-            # Mock API call (replace with actual Unipile API call)
-            candidates_page = _mock_linkedin_api_call(search_params)
+            # Real LinkedIn API call using new infrastructure or fallback
+            candidates_page = _real_linkedin_api_call(search_params)
             
             if not candidates_page.get("data"):
                 break
@@ -234,8 +242,8 @@ def _search_without_cursor(search_criteria: Dict[str, Any], max_results: int) ->
         if search_criteria.get("filters"):
             search_params.update(search_criteria["filters"])
         
-        # Mock API call (replace with actual Unipile API call)
-        result = _mock_linkedin_api_call(search_params)
+        # Real LinkedIn API call using new infrastructure or fallback
+        result = _real_linkedin_api_call(search_params)
         
         return result.get("data", [])
         
@@ -415,6 +423,107 @@ def _generate_next_cursor(candidates: List[Dict[str, Any]]) -> Optional[str]:
         last_candidate = candidates[-1]
         return f"cursor_{last_candidate.get('id', 'unknown')}_{len(candidates)}"
     return None
+
+def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Real LinkedIn API call using Unipile API.
+    Falls back to mock if new infrastructure is not available.
+    """
+    # Try to use new LinkedIn API client
+    if _LINKEDIN_CLIENT_AVAILABLE:
+        try:
+            from src.infrastructure.external_services.linkedin.linkedin_api_client import LinkedInAPIClient
+            
+            # Create client instance
+            client = LinkedInAPIClient()
+            
+            # Extract search parameters
+            query = search_params.get("query", "")
+            location = search_params.get("location", "")
+            company = search_params.get("current_company", "")
+            title = search_params.get("job_title", "")
+            skills_param = search_params.get("skills", [])
+            # Handle both list and string formats
+            if isinstance(skills_param, str):
+                skills = [s.strip() for s in skills_param.split(",")] if skills_param else None
+            elif isinstance(skills_param, list):
+                skills = skills_param if skills_param else None
+            else:
+                skills = None
+            limit = search_params.get("limit", 25)
+            cursor = search_params.get("cursor")
+            
+            # Build query string if needed
+            if not query and (location or company or title or skills):
+                query_parts = []
+                if location:
+                    query_parts.append(f"location:{location}")
+                if company:
+                    query_parts.append(f"company:{company}")
+                if title:
+                    query_parts.append(f"title:{title}")
+                if skills:
+                    for skill in skills:
+                        query_parts.append(f"skill:{skill}")
+                query = " ".join(query_parts)
+            
+            # Make synchronous API call (LinkedInAPIClient uses requests, not async)
+            result = client.search_people(
+                query=query if query else None,
+                location=location if location else None,
+                company=company if company else None,
+                title=title if title else None,
+                skills=skills,
+                limit=limit,
+                cursor=cursor
+            )
+            
+            # Transform result to expected format
+            items = result.get("items", result.get("data", []))
+            
+            # Map LinkedIn API response to expected format
+            candidates = []
+            for item in items:
+                candidate = {
+                    "id": item.get("id") or item.get("provider_id", ""),
+                    "provider_id": item.get("provider_id") or item.get("id", ""),
+                    "first_name": item.get("first_name", ""),
+                    "last_name": item.get("last_name", ""),
+                    "full_name": item.get("full_name") or item.get("name", ""),
+                    "headline": item.get("headline", ""),
+                    "location": item.get("location", ""),
+                    "current_position": item.get("current_position") or item.get("title", ""),
+                    "current_company": item.get("current_company") or item.get("company", ""),
+                    "summary": item.get("summary", ""),
+                    "profile_url": item.get("profile_url") or item.get("linkedin_url", ""),
+                    "linkedin_url": item.get("linkedin_url") or item.get("profile_url", ""),
+                    "experience": item.get("experience", []),
+                    "skills": item.get("skills", []),
+                    "education": item.get("education", []),
+                    "open_to_work": item.get("open_to_work", False),
+                    "recent_posts": item.get("recent_posts", []),
+                    # Include all original data for compatibility
+                    **item
+                }
+                candidates.append(candidate)
+            
+            logger.info(f"✅ Real LinkedIn API call successful: {len(candidates)} candidates found")
+            
+            return {
+                "data": candidates,
+                "has_more": result.get("has_more", False),
+                "next_cursor": result.get("next_cursor") or result.get("cursor")
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error in real LinkedIn API call: {e}, falling back to mock")
+            import traceback
+            logger.debug(traceback.format_exc())
+            # Fall through to mock implementation
+    
+    # Fallback to mock if new infrastructure not available or error occurred
+    logger.warning("⚠️ Using mock LinkedIn API call (fallback)")
+    return _mock_linkedin_api_call(search_params)
 
 def _mock_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
     """

@@ -73,17 +73,38 @@ def get_linkedin_saved_searches() -> List[Dict[str, Any]]:
         List[Dict[str, Any]]: A list of LinkedIn saved searches with their parameters.
     """
     try:
-        # Use your exact API configuration
-        url = "https://api4.unipile.com:13447/api/v1/linkedin/search/parameters?type=SAVED_SEARCHES&account_id=secrets.chains_accountid"
+        config = get_linkedin_config()  # Use environment variables instead of hardcoded values
+        
+        url = f"{config['base_url']}/linkedin/search/parameters"
         
         headers = {
             "accept": "application/json",
-            "X-API-KEY": "SdTiH0wF.hieQExVfFi8S8uTcOGYlA6vfE5V2UNy0rnyAcVgDFl0="
+            "X-API-KEY": config['api_key']  # Use from environment
+        }
+        
+        params = {
+            "type": "SAVED_SEARCHES",
+            "account_id": config['account_id']  # Use from environment
         }
         
         print("🔍 Fetching saved searches from LinkedIn API...")
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
+        
+        # Make request with retry logic
+        for attempt in range(config['max_retries']):
+            try:
+                response = requests.get(
+                    url, 
+                    headers=headers, 
+                    params=params, 
+                    timeout=config['timeout']
+                )
+                response.raise_for_status()
+                break
+                
+            except requests.exceptions.RequestException as e:
+                if attempt == config['max_retries'] - 1:
+                    raise e
+                print(f"Request failed (attempt {attempt + 1}/{config['max_retries']}): {e}")
         
         data = response.json()
         print(f"LinkedIn API response received")
@@ -107,6 +128,9 @@ def get_linkedin_saved_searches() -> List[Dict[str, Any]]:
         print(f"Retrieved {len(saved_searches)} saved searches")
         return saved_searches
         
+    except ValueError as e:
+        print(f" Configuration error: {e}")
+        return []
     except requests.exceptions.RequestException as e:
         print(f" Network error fetching LinkedIn saved searches: {e}")
         return []
@@ -122,10 +146,46 @@ def get_linkedin_saved_searches() -> List[Dict[str, Any]]:
 def get_projects_from_linkedin_api() -> List[Dict[str, Any]]:
     """Get projects from LinkedIn API using environment configuration.
     
+    This function now uses the new LinkedIn API client infrastructure while
+    maintaining backward compatibility with the old interface.
+    
     Returns:
         List[Dict[str, Any]]: A list of projects from LinkedIn API.
     """
     try:
+        # Try to use new infrastructure if available
+        try:
+            from src.infrastructure.external_services.linkedin.linkedin_api_client import LinkedInAPIClient
+            api_client = LinkedInAPIClient()
+            items = api_client.get_search_parameters()
+            
+            projects = []
+            for item in items:
+                if item.get('object') == 'LinkedinSearchParameter':
+                    additional_data = item.get('additional_data', {})
+                    project_id = additional_data.get('project_id', '')
+                    
+                    if project_id:  # Only process items with valid project_id
+                        project = {
+                            'project_id': project_id,
+                            'name': item.get('title', 'Unnamed Project'),
+                            'title': item.get('title', ''),
+                            'created_at': item.get('created_at', datetime.utcnow().isoformat() + "Z"),
+                            'linkedin_search_id': item.get('id', ''),
+                            'status': 'active',
+                            'source': 'linkedin_api',
+                            'details': item  # Full item data for reference
+                        }
+                        projects.append(project)
+            
+            print(f"✅ Successfully retrieved {len(projects)} projects from LinkedIn API (using new infrastructure)")
+            return projects
+            
+        except ImportError:
+            # Fallback to old implementation if new infrastructure not available
+            pass
+        
+        # Original implementation (fallback)
         config = get_linkedin_config()
         
         url = f"{config['base_url']}/linkedin/search/parameters"
@@ -187,20 +247,20 @@ def get_projects_from_linkedin_api() -> List[Dict[str, Any]]:
                     }
                     projects.append(project)
         
-        print(f" Successfully retrieved {len(projects)} projects from LinkedIn API")
+        print(f"✅ Successfully retrieved {len(projects)} projects from LinkedIn API")
         return projects
         
     except ValueError as e:
-        print(f" Configuration error: {e}")
+        print(f"❌ Configuration error: {e}")
         return []
     except requests.exceptions.RequestException as e:
-        print(f" Network error fetching projects from LinkedIn API: {e}")
+        print(f"❌ Network error fetching projects from LinkedIn API: {e}")
         return []
     except json.JSONDecodeError as e:
-        print(f" Error parsing LinkedIn API response: {e}")
+        print(f"❌ Error parsing LinkedIn API response: {e}")
         return []
     except Exception as e:
-        print(f" Unexpected error in get_projects_from_linkedin_api: {e}")
+        print(f"❌ Unexpected error in get_projects_from_linkedin_api: {e}")
         return []
 
 
