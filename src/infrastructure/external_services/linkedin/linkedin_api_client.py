@@ -163,6 +163,50 @@ class LinkedInAPIClient:
             logger.error(f"Error fetching search parameters: {e}")
             return []
     
+    def execute_saved_search(
+        self,
+        search_id: str,
+        limit: int = 25,
+        cursor: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute a saved LinkedIn search to retrieve candidates.
+        
+        This is the RECOMMENDED approach for Unipile as it works reliably
+        across all account types without needing Sales Navigator.
+        
+        Args:
+            search_id: The ID of the saved search (from get_saved_searches())
+            limit: Maximum number of results to return (default: 25, max: 100)
+            cursor: Pagination cursor for next page
+            
+        Returns:
+            Dict with 'data' (list of profiles), 'has_more', and 'next_cursor'
+        """
+        try:
+            # Build request data
+            request_data = {
+                "account_id": self.account_id,
+                "search_id": str(search_id),
+                "limit": min(limit, 100)
+            }
+            
+            if cursor:
+                request_data["cursor"] = cursor
+            
+            # Execute the saved search
+            data = self._make_request('POST', 'linkedin/search/execute', data=request_data)
+            
+            # Format response
+            result = self._format_search_response(data)
+            
+            logger.info(f"Executed saved search {search_id}, got {len(result.get('data', []))} results")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error executing saved search {search_id}: {e}")
+            return {"data": [], "has_more": False, "next_cursor": None}
+    
     def get_user_profile(self, provider_public_id: str, linkedin_sections: str = "*") -> Dict[str, Any]:
         """
         Get full LinkedIn profile by public ID.
@@ -199,16 +243,15 @@ class LinkedInAPIClient:
         skills: Optional[List[str]] = None,
         limit: int = 25,
         cursor: Optional[str] = None,
-        use_sales_navigator: bool = True
+        api_type: str = "classic"  # "classic", "sales_navigator", or "recruiter"
     ) -> Dict[str, Any]:
         """
         Search for people on LinkedIn using Unipile API.
         
-        NOTE: Direct search endpoint may not be available for all account types.
-        This method tries multiple approaches:
-        1. Sales Navigator API search
-        2. Standard search format
-        3. Falls back gracefully if endpoint is not available
+        Unipile requires specific format:
+        - "classic": Standard LinkedIn search (most accounts)
+        - "sales_navigator": LinkedIn Sales Navigator (premium)
+        - "recruiter": LinkedIn Recruiter (enterprise)
         
         Args:
             query: Search query string (used as keywords)
@@ -218,7 +261,7 @@ class LinkedInAPIClient:
             skills: List of skills to search for
             limit: Maximum results per page (max 100)
             cursor: Pagination cursor
-            use_sales_navigator: Use Sales Navigator API (default: True)
+            api_type: LinkedIn API type to use
         
         Returns:
             Search results with candidates and pagination info
@@ -235,62 +278,58 @@ class LinkedInAPIClient:
             
             keywords = " ".join(keywords_parts) if keywords_parts else None
             
-            # Try Sales Navigator API format first
-            if use_sales_navigator:
-                request_data = {
-                    "api": "sales_navigator",
-                    "category": "people",
-                    "account_id": self.account_id,
-                    "limit": min(limit, 100)
-                }
-                
-                if keywords:
-                    request_data["keywords"] = keywords
-                if location:
-                    request_data["location"] = location
-                if company:
-                    request_data["company"] = company
-                request_data["profile_language"] = ["en", "nl"]
-                
-                if cursor:
-                    request_data["cursor"] = cursor
-                
-                try:
-                    data = self._make_request('POST', 'linkedin/search', data=request_data)
-                    return self._format_search_response(data)
-                except Exception as e1:
-                    logger.debug(f"Sales Navigator search failed: {e1}")
-            
-            # Fallback to standard search format
+            # Build request according to Unipile schema
             request_data = {
-                "type": "people",
+                "api": api_type,
+                "category": "people"
+            }
+            
+            # Add filters based on API type
+            if keywords:
+                request_data["keywords"] = keywords
+            
+            # Profile language (recommended)
+            request_data["profile_language"] = ["en", "nl"]
+            
+            # Note: account_id goes in QUERY PARAMS, not body
+            params = {
                 "account_id": self.account_id,
                 "limit": min(limit, 100)
             }
             
-            if keywords:
-                request_data["query"] = keywords
-            if location:
-                request_data["location"] = location
-            if company:
-                request_data["company"] = company
-            if title:
-                request_data["title"] = title
-            if skills:
-                request_data["skills"] = ",".join(skills)
             if cursor:
-                request_data["cursor"] = cursor
+                params["cursor"] = cursor
             
             try:
-                data = self._make_request('POST', 'linkedin/search', data=request_data)
-                return self._format_search_response(data)
-            except Exception as e2:
-                logger.warning(f"LinkedIn search endpoint not available: {e2}")
-                logger.info("Consider using saved searches or individual profile lookup")
-                return {"data": [], "has_more": False, "next_cursor": None}
+                # Make request with account_id in params
+                response = self._make_request(
+                    'POST', 
+                    'linkedin/search', 
+                    params=params,
+                    data=request_data
+                )
+                return self._format_search_response(response)
+                
+            except Exception as e:
+                logger.error(f"LinkedIn search failed with {api_type}: {e}")
+                
+                # Try fallback to classic if using sales_navigator
+                if api_type == "sales_navigator":
+                    logger.info("Retrying with 'classic' API...")
+                    request_data["api"] = "classic"
+                    response = self._make_request(
+                        'POST',
+                        'linkedin/search',
+                        params=params,
+                        data=request_data
+                    )
+                    return self._format_search_response(response)
+                else:
+                    raise
             
         except Exception as e:
             logger.error(f"Error searching LinkedIn: {e}")
+            logger.info("💡 Tip: Use saved searches (execute_saved_search) or profile scraping instead")
             return {"data": [], "has_more": False, "next_cursor": None}
     
     def _format_search_response(self, data: Dict[str, Any]) -> Dict[str, Any]:

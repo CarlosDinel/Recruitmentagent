@@ -427,7 +427,7 @@ def _generate_next_cursor(candidates: List[Dict[str, Any]]) -> Optional[str]:
 def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
     """
     Real LinkedIn API call using Unipile API.
-    Falls back to mock if new infrastructure is not available.
+    Falls back to mock if API is not available or fails.
     """
     # Try to use new LinkedIn API client
     if _LINKEDIN_CLIENT_AVAILABLE:
@@ -443,39 +443,41 @@ def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
             company = search_params.get("current_company", "")
             title = search_params.get("job_title", "")
             skills_param = search_params.get("skills", [])
-            # Handle both list and string formats
+            
+            # Handle both list and string formats for skills
             if isinstance(skills_param, str):
                 skills = [s.strip() for s in skills_param.split(",")] if skills_param else None
             elif isinstance(skills_param, list):
                 skills = skills_param if skills_param else None
             else:
                 skills = None
+            
             limit = search_params.get("limit", 25)
             cursor = search_params.get("cursor")
             
-            # Build query string if needed
-            if not query and (location or company or title or skills):
-                query_parts = []
-                if location:
-                    query_parts.append(f"location:{location}")
-                if company:
-                    query_parts.append(f"company:{company}")
-                if title:
-                    query_parts.append(f"title:{title}")
-                if skills:
-                    for skill in skills:
-                        query_parts.append(f"skill:{skill}")
-                query = " ".join(query_parts)
+            # Build comprehensive query string
+            query_parts = []
+            if query:
+                query_parts.append(query)
+            if title:
+                query_parts.append(title)
+            if skills:
+                query_parts.extend(skills[:3])  # Add top 3 skills to query
             
-            # Make synchronous API call (LinkedInAPIClient uses requests, not async)
+            search_query = " ".join(query_parts) if query_parts else None
+            
+            logger.info(f"🔍 Real LinkedIn API search: query='{search_query}', location='{location}', limit={limit}")
+            
+            # Make synchronous API call using correct Unipile format
             result = client.search_people(
-                query=query if query else None,
+                query=search_query,
                 location=location if location else None,
                 company=company if company else None,
                 title=title if title else None,
                 skills=skills,
                 limit=limit,
-                cursor=cursor
+                cursor=cursor,
+                api_type="classic"  # Use classic API (most compatible)
             )
             
             # Transform result to expected format
@@ -484,19 +486,24 @@ def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
             # Map LinkedIn API response to expected format
             candidates = []
             for item in items:
+                # Extract profile URL from id if needed
+                profile_url = item.get("profile_url") or item.get("linkedin_url", "")
+                if not profile_url and item.get("id"):
+                    profile_url = f"https://linkedin.com/in/{item.get('id')}"
+                
                 candidate = {
                     "id": item.get("id") or item.get("provider_id", ""),
                     "provider_id": item.get("provider_id") or item.get("id", ""),
                     "first_name": item.get("first_name", ""),
                     "last_name": item.get("last_name", ""),
-                    "full_name": item.get("full_name") or item.get("name", ""),
+                    "full_name": item.get("full_name") or item.get("name") or item.get("display_name", "LinkedIn Member"),
                     "headline": item.get("headline", ""),
                     "location": item.get("location", ""),
                     "current_position": item.get("current_position") or item.get("title", ""),
                     "current_company": item.get("current_company") or item.get("company", ""),
                     "summary": item.get("summary", ""),
-                    "profile_url": item.get("profile_url") or item.get("linkedin_url", ""),
-                    "linkedin_url": item.get("linkedin_url") or item.get("profile_url", ""),
+                    "profile_url": profile_url,
+                    "linkedin_url": profile_url,
                     "experience": item.get("experience", []),
                     "skills": item.get("skills", []),
                     "education": item.get("education", []),
@@ -507,7 +514,7 @@ def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
                 }
                 candidates.append(candidate)
             
-            logger.info(f"✅ Real LinkedIn API call successful: {len(candidates)} candidates found")
+            logger.info(f"✅ Real LinkedIn API successful: {len(candidates)} candidates found")
             
             return {
                 "data": candidates,
@@ -516,13 +523,13 @@ def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
             }
             
         except Exception as e:
-            logger.error(f"❌ Error in real LinkedIn API call: {e}, falling back to mock")
+            logger.error(f"❌ Real LinkedIn API error: {e}")
             import traceback
             logger.debug(traceback.format_exc())
             # Fall through to mock implementation
     
     # Fallback to mock if new infrastructure not available or error occurred
-    logger.warning("⚠️ Using mock LinkedIn API call (fallback)")
+    logger.warning("⚠️ Using mock LinkedIn API (fallback - set LINKEDIN_API_KEY to use real API)")
     return _mock_linkedin_api_call(search_params)
 
 def _mock_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
@@ -748,11 +755,110 @@ def _extract_profile_id_from_url(profile_url: str) -> str:
 
 def _scrape_profile_data(profile_url: str, profile_id: str) -> Dict[str, Any]:
     """
-    Scrape detailed profile data from LinkedIn.
-    This is a mock implementation - replace with actual scraping logic.
+    Scrape detailed profile data from LinkedIn using Unipile API.
+    Falls back to mock data if API is not available.
     """
     
-    # Mock profile data
+    # Try to use real Unipile API
+    if _LINKEDIN_CLIENT_AVAILABLE:
+        try:
+            from src.infrastructure.external_services.linkedin.linkedin_api_client import LinkedInAPIClient
+            
+            client = LinkedInAPIClient()
+            
+            logger.info(f"🔍 Real profile scraping for: {profile_id}")
+            
+            # Call Unipile API to get full profile
+            profile_data = client.get_user_profile(
+                provider_public_id=profile_id,
+                linkedin_sections="*"  # Get all sections
+            )
+            
+            # Transform Unipile response to internal format
+            if profile_data and isinstance(profile_data, dict):
+                # Extract work experience
+                work_history = []
+                if profile_data.get("positions"):
+                    for position in profile_data.get("positions", []):
+                        work_history.append({
+                            "company": position.get("company_name", ""),
+                            "position": position.get("title", ""),
+                            "duration": position.get("date_range", ""),
+                            "duration_years": position.get("duration_years", 0),
+                            "description": position.get("description", ""),
+                            "start_year": position.get("start_year"),
+                            "end_year": position.get("end_year")
+                        })
+                
+                # Extract education
+                education_list = []
+                if profile_data.get("education"):
+                    for edu in profile_data.get("education", []):
+                        education_list.append({
+                            "school": edu.get("school_name", ""),
+                            "degree": edu.get("degree", ""),
+                            "field_of_study": edu.get("field_of_study", ""),
+                            "years": edu.get("date_range", ""),
+                            "start_year": edu.get("start_year"),
+                            "end_year": edu.get("end_year")
+                        })
+                
+                # Extract skills
+                skills_list = []
+                if profile_data.get("skills"):
+                    skills_list = [skill.get("name", skill) if isinstance(skill, dict) else skill 
+                                  for skill in profile_data.get("skills", [])]
+                
+                # Extract certifications
+                certifications_list = []
+                if profile_data.get("certifications"):
+                    for cert in profile_data.get("certifications", []):
+                        certifications_list.append({
+                            "name": cert.get("name", ""),
+                            "issuing_organization": cert.get("authority", ""),
+                            "issue_date": cert.get("date", ""),
+                            "credential_url": cert.get("url", "")
+                        })
+                
+                # Build complete profile
+                enriched_profile = {
+                    "provider_id": profile_data.get("id") or profile_id,
+                    "naam": profile_data.get("display_name") or profile_data.get("full_name", "Unknown"),
+                    "headline": profile_data.get("headline", ""),
+                    "locatie": profile_data.get("location", {}).get("name", "") if isinstance(profile_data.get("location"), dict) else profile_data.get("location", ""),
+                    "current_position": work_history[0].get("position", "") if work_history else "",
+                    "current_company": work_history[0].get("company", "") if work_history else "",
+                    "experience": work_history,
+                    "education": education_list,
+                    "skills": skills_list,
+                    "summary": profile_data.get("summary", ""),
+                    "contact_info": {
+                        "email": profile_data.get("email", ""),
+                        "phone": profile_data.get("phone", ""),
+                        "twitter": profile_data.get("twitter", ""),
+                        "website": profile_data.get("websites", [])
+                    },
+                    "recent_activities": profile_data.get("posts", []),
+                    "recommendations": profile_data.get("recommendations", []),
+                    "languages": profile_data.get("languages", []),
+                    "certifications": certifications_list,
+                    "connections_count": profile_data.get("connections_count", 0),
+                    "followers_count": profile_data.get("followers_count", 0),
+                    "profile_picture": profile_data.get("picture_url", "")
+                }
+                
+                logger.info(f"✅ Real profile scraping successful: {enriched_profile.get('naam')}")
+                return enriched_profile
+            
+        except Exception as e:
+            logger.error(f"❌ Real profile scraping error: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            # Fall through to mock
+    
+    # Fallback to mock profile data
+    logger.warning(f"⚠️ Using mock profile data for {profile_id} (set LINKEDIN_API_KEY to use real API)")
+    
     mock_profile = {
         "provider_id": f"linkedin_{profile_id}",
         "naam": "John Doe",
