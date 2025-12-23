@@ -1,7 +1,7 @@
 # 🤖 AI Recruitment Agent System
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-22%2F22%20passing-success.svg)](./test/)
+[![Tests](https://img.shields.io/badge/tests-30%2F30%20passing-success.svg)](./test/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-production%20ready%20100%25-brightgreen.svg)](README.md)
 [![API](https://img.shields.io/badge/LinkedIn%20API-integrated-blue.svg)](README.md)
@@ -258,31 +258,79 @@ When running in API mode, available endpoints:
 ### Run Tests
 
 ```bash
-# All tests
+# All tests (includes mock tests)
 pytest test/test_complete_mock.py -v
+
+# Profile scraping agent tests
+pytest test/test_profile_scraping_agent.py -v
+pytest test/test_profile_scraping_integration.py -v
+
+# Real API integration tests (requires LinkedIn credentials)
+pytest test/test_real_api_integration.py -v -s
+
+# Skip real API tests (for CI/CD without credentials)
+pytest test/ --ignore=test/test_real_api_integration.py
 
 # Specific test class
 pytest test/test_complete_mock.py::TestEmailOutreachWithMocks -v
 
 # With coverage
-pytest test/test_complete_mock.py --cov=agents --cov=sub_agents --cov-report=html
+pytest test/ --cov=agents --cov=sub_agents --cov-report=html
 
 # Generate report
-pytest test/test_complete_mock.py -v --tb=short > test_results.txt
+pytest test/ -v --tb=short > test_results.txt
+```
+
+### Real API Tests
+
+The `test_real_api_integration.py` file contains tests that use **real Unipile API calls**:
+
+**Requirements:**
+- Valid `LINKEDIN_API_KEY` in `.env`
+- Valid `LINKEDIN_ACCOUNT_ID` in `.env`
+- Active Unipile subscription
+
+**What's tested:**
+- ✅ Real LinkedIn candidate search
+- ✅ Real profile scraping with enrichment
+- ✅ Complete end-to-end sourcing flow
+- ✅ API error handling
+- ✅ Rate limit compliance
+
+**Note:** These tests count against your Unipile API quota. They automatically skip if credentials are not configured.
+
+```bash
+# Run real API tests
+pytest test/test_real_api_integration.py -v -s
+
+# Output example:
+# ✅ 8/8 tests passing
+# - Real search: 3 candidates found
+# - Profile scraping: 50 skills extracted
+# - E2E flow: Complete success
 ```
 
 ### Test Results
 
-✅ **22/22 tests passing**
+✅ **30/30 tests passing**
 
+**Mock Tests (14/14):**
 - Email Outreach: 3/3 ✅
 - LinkedIn Outreach: 5/5 ✅
 - Database Operations: 3/3 ✅
 - Email Campaign Flow: 1/1 ✅
 - LinkedIn Campaign Flow: 1/1 ✅
 - End-to-End Workflow: 1/1 ✅
-- Profile Scraping Agent: 16/16 ✅
-- Profile Scraping Integration: 6/6 ✅
+
+**Profile Scraping Tests (22/22):**
+- Unit tests: 16/16 ✅
+- Integration tests: 6/6 ✅
+
+**Real API Integration Tests (8/8):**
+- LinkedIn Search: 3/3 ✅
+- Profile Scraping: 2/2 ✅
+- End-to-End: 2/2 ✅
+- Quota Management: 1/1 ✅
 ## 🗺️ Development Roadmap
 
 ### ✅ Completed (December 2025)
