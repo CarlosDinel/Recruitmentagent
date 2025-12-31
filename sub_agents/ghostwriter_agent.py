@@ -14,8 +14,7 @@ from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
-# Local imports
-from prompts.ghostwriter_agent_prompts import GhostwriterAgentPrompts, get_ghostwriter_config
+# Local imports - none needed, prompts embedded
 
 # Load environment variables
 load_dotenv()
@@ -23,6 +22,71 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+class GhostwriterPrompts:
+    """Embedded prompts for ghostwriter message generation."""
+    
+    @staticmethod
+    def system_prompt(user_info: Dict[str, Any]) -> str:
+        voornaam = user_info.get('voornaam', 'recruiter')
+        bedrijf = user_info.get('bedrijfsnaam', 'recruitment team')
+        return (
+            f"You are writing recruitment messages for {voornaam} from {bedrijf}. "
+            f"Style: professional yet warm, direct, personal (use first names), short sentences, max 150 words for LinkedIn. "
+            f"Sign off: Met vriendelijke groet,\\n{voornaam}\\n{user_info.get('functietitel', 'Recruitment Consultant')}"
+        )
+    
+    @staticmethod
+    def write_first_message_prompt(candidate_name: str, candidate_info: Dict[str, Any], job_info: Dict[str, Any], user_info: Dict[str, Any]) -> str:
+        return (
+            f"Write FIRST LinkedIn outreach to {candidate_name}.\n"
+            f"Role: {candidate_info.get('current_position', 'Unknown')} at {candidate_info.get('current_company', 'Unknown')}\n"
+            f"Skills: {', '.join(candidate_info.get('skills', []))}\n"
+            f"Vacancy: {job_info.get('job_title', 'Unknown')} at {job_info.get('company_name', 'Unknown')}\n"
+            f"Max 150 words. Connect their experience to role, be specific, end with friendly call to chat."
+        )
+    
+    @staticmethod
+    def write_follow_up_message_prompt(candidate_name: str, candidate_info: Dict[str, Any], conversation_history: str, message_type: str, user_info: Dict[str, Any]) -> str:
+        return (
+            f"Write FOLLOW-UP message to {candidate_name}.\n"
+            f"History: {conversation_history}\n"
+            f"Type: {message_type}\n"
+            f"Max 100 words. Respond to their last message, keep it relevant, clear CTA."
+        )
+    
+    @staticmethod
+    def write_meeting_invite_prompt(candidate_name: str, meeting_options: list, context: str, user_info: Dict[str, Any]) -> str:
+        opts = '\\n'.join([f"- {o}" for o in meeting_options])
+        return (
+            f"Write MEETING INVITE to {candidate_name}.\n"
+            f"Context: {context}\n"
+            f"Options:\\n{opts}\n"
+            f"Max 80 words. Reference conversation, propose times, make it easy to choose."
+        )
+    
+    @staticmethod
+    def write_rejection_graceful_prompt(candidate_name: str, reason: Optional[str], user_info: Dict[str, Any]) -> str:
+        return (
+            f"Write graceful CLOSING message to {candidate_name} (not interested).\n"
+            f"Reason: {reason or 'Not given'}\n"
+            f"Max 50 words. Accept with understanding, leave door open, wish them well."
+        )
+    
+    @staticmethod
+    def adapt_tone_for_sector_prompt(message_draft: str, sector: str) -> str:
+        return (
+            f"Adapt tone for {sector} sector:\\n{message_draft}\n"
+            f"Keep core message, adjust formality/style for {sector}. Same length."
+        )
+
+def get_ghostwriter_config(user_info: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "user_info": user_info,
+        "max_message_length": {"first_message": 150, "follow_up": 100, "meeting_invite": 80, "graceful_rejection": 50},
+        "signature_format": f"Met vriendelijke groet,\\n{user_info.get('voornaam', 'Recruiter')}\\n{user_info.get('functietitel', 'Recruitment Consultant')}"
+    }
+
 
 
 class GhostwriterAgent:
@@ -54,7 +118,7 @@ class GhostwriterAgent:
         # Initialize LLM
         if llm_provider == "openai":
             self.llm = ChatOpenAI(
-                model=os.getenv("OPENAI_MODEL", "gpt-4"),
+                model=os.getenv("OPENAI_MODEL", "gpt-5"),
                 temperature=0.7,  # Creative but consistent
                 api_key=os.getenv("OPENAI_API_KEY")
             )
@@ -90,10 +154,10 @@ class GhostwriterAgent:
             logger.info(f"📝 Writing first message for {candidate_name}")
             
             # Generate system prompt with user context
-            system_prompt = GhostwriterAgentPrompts.system_prompt(self.user_info)
+            system_prompt = GhostwriterPrompts.system_prompt(self.user_info)
             
             # Generate task-specific prompt
-            task_prompt = GhostwriterAgentPrompts.write_first_message_prompt(
+            task_prompt = GhostwriterPrompts.write_first_message_prompt(
                 candidate_name=candidate_name,
                 candidate_info=candidate_info,
                 job_info=job_info,
@@ -163,8 +227,8 @@ class GhostwriterAgent:
         try:
             logger.info(f"📝 Writing follow-up message for {candidate_name}")
             
-            system_prompt = GhostwriterAgentPrompts.system_prompt(self.user_info)
-            task_prompt = GhostwriterAgentPrompts.write_follow_up_message_prompt(
+            system_prompt = GhostwriterPrompts.system_prompt(self.user_info)
+            task_prompt = GhostwriterPrompts.write_follow_up_message_prompt(
                 candidate_name=candidate_name,
                 candidate_info=candidate_info,
                 conversation_history=conversation_history,
@@ -222,8 +286,8 @@ class GhostwriterAgent:
         try:
             logger.info(f"📅 Writing meeting invite for {candidate_name}")
             
-            system_prompt = GhostwriterAgentPrompts.system_prompt(self.user_info)
-            task_prompt = GhostwriterAgentPrompts.write_meeting_invite_prompt(
+            system_prompt = GhostwriterPrompts.system_prompt(self.user_info)
+            task_prompt = GhostwriterPrompts.write_meeting_invite_prompt(
                 candidate_name=candidate_name,
                 meeting_options=meeting_options,
                 context=context,
@@ -277,8 +341,8 @@ class GhostwriterAgent:
         try:
             logger.info(f"👋 Writing graceful rejection for {candidate_name}")
             
-            system_prompt = GhostwriterAgentPrompts.system_prompt(self.user_info)
-            task_prompt = GhostwriterAgentPrompts.write_rejection_graceful_prompt(
+            system_prompt = GhostwriterPrompts.system_prompt(self.user_info)
+            task_prompt = GhostwriterPrompts.write_rejection_graceful_prompt(
                 candidate_name=candidate_name,
                 reason=reason,
                 user_info=self.user_info
@@ -327,7 +391,7 @@ class GhostwriterAgent:
         try:
             logger.info(f"🎨 Adapting tone for {sector} sector")
             
-            task_prompt = GhostwriterAgentPrompts.adapt_tone_for_sector_prompt(
+            task_prompt = GhostwriterPrompts.adapt_tone_for_sector_prompt(
                 message_draft=message_draft,
                 sector=sector
             )

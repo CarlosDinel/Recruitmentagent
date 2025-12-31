@@ -110,16 +110,185 @@ load_dotenv()
 # Setup path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Clean Architecture imports - REFACTORED
+from agents.infrastructure.services import (
+    LLMService,
+    DatabaseService,
+    ConfigService
+)
+from agents.shared.logging_config import get_logger
+from agents.shared.error_handling import DatabaseError, LLMError, ValidationError
+
+# Import use cases
+from agents.application.usecases.process_recruitment_request import ProcessRecruitmentRequestUseCase
+from agents.application.usecases.execute_sourcing_workflow import ExecuteSourcingWorkflowUseCase
+from agents.application.usecases.execute_outreach_campaign import ExecuteOutreachCampaignUseCase
+from agents.application.usecases.monitor_progress import MonitorProgressUseCase
+from agents.application.usecases.generate_report import GenerateReportUseCase
+
 # Import your tools and other agents
 from tools.get_projects import get_all_projects, convert_project_to_json
-from state.agent_state import AgentState
-
-from prompts.recruitment_executive_agent_prompts import RecruitmentPrompts
 
 # NOTE: Circular import prevention - Import flows only when needed
 # from flows.recruitment_executive_flow import RecruitmentExecutiveFlow
 
-# agents imports
+# ============================================================================
+# EMBEDDED PROMPTS - Recruitment Executive Agent
+# ============================================================================
+
+class RecruitmentPrompts:
+    """
+    Embedded prompts for the RecruitmentExecutiveAgent.
+    
+    These prompts guide the agent in breaking down user requests into tasks,
+    coordinating sub-agents, and ensuring accurate recruitment outcomes.
+    """
+
+    @staticmethod
+    def user_request_prompt(user_request: str) -> str:
+        """System prompt to analyze user requests and orchestrate the recruitment process using the STAR methodology."""
+        return f"""# RECRUITMENT EXECUTIVE ORCHESTRATOR
+
+## USER REQUEST
+{user_request}
+
+## YOUR ROLE
+You are the Executive Recruitment Orchestrator, responsible for breaking down recruitment requests into atomic, actionable tasks and coordinating specialized sub-agents to deliver complete recruitment outcomes.
+
+## CORE METHODOLOGY: STAR LOOP
+
+### S – SOLICIT (Clarify & Validate)
+- **ANALYZE** the user request for completeness and specificity
+- **IDENTIFY** missing critical information (job requirements, timeline, budget, candidate profile)
+- **ASK** targeted clarifying questions if the request is underspecified
+- **VALIDATE** that you have sufficient details to proceed
+
+### T – TASKIFY (Break Down & Structure)
+- **DECOMPOSE** the request into minimum viable atomic subtasks
+- **PRIORITIZE** tasks by dependency and urgency
+- **FORMAT** as numbered markdown list with clear deliverables
+- **ENSURE** each task has measurable success criteria
+
+### A – ASSIGN (Delegate & Execute)
+- **ROUTE** each subtask to the appropriate Manager Agent with explicit inputs
+- **PROVIDE** complete context and required parameters
+- **SET** clear expectations and deadlines
+- **TRACK** delegation status and agent availability
+
+### R – REVIEW (Validate & Consolidate)
+- **EVALUATE** outputs from sub-agents for completeness and quality
+- **IDENTIFY** gaps, errors, or incomplete deliverables
+- **REASSIGN** failed tasks with refined instructions
+- **CONSOLIDATE** results into structured summary for user
+
+## CRITICAL GUARDRAILS
+-  LinkedIn Authentication Protocol: Run LinkedIn-auth-check at workflow start
+-  Database Integrity Rules: NEVER write directly to Database Agent
+-  Task Decomposition Standards: ONE atomic task per sub-agent call
+
+## RESPONSE STRUCTURE
+1. REQUEST ANALYSIS: Summary of understood requirements
+2. TASK BREAKDOWN: Numbered list with specific deliverables
+3. EXECUTION PLAN: Task dependencies and sequencing
+4. SUCCESS METRICS: Key performance indicators
+
+Now process the user request following this framework."""
+
+    @staticmethod
+    def parse_requirements_prompt(user_request: str) -> str:
+        """Prompt for parsing and extracting requirements from user requests."""
+        return f"""# REQUIREMENT EXTRACTION SPECIALIST
+
+Extract and structure ALL relevant recruitment requirements from this request:
+
+{user_request}
+
+Return ONLY valid JSON with this structure:
+{{
+  "position": "job title",
+  "skills": ["skill1", "skill2"],
+  "location": "location or empty",
+  "experience_level": "Junior|Mid-level|Senior|Lead|Executive",
+  "urgency": "urgent|normal|low",
+  "quantity": 1,
+  "work_type": "Full-time|Part-time|Contract|Freelance",
+  "remote_preference": "Remote|Hybrid|On-site",
+  "raw_request": "{user_request}"
+}}
+
+CRITICAL: Return ONLY valid JSON, no additional text."""
+
+    @staticmethod
+    def plan_strategy_prompt(user_request: str, parsed_requirements: dict, current_projects: list) -> str:
+        """Prompt for planning recruitment strategy based on available projects and requirements."""
+        return f"""# RECRUITMENT STRATEGY PLANNER
+
+## CONTEXT
+User Request: {user_request}
+Requirements: {parsed_requirements}
+Projects: {current_projects}
+
+Analyze and design optimal recruitment strategy.
+
+Return ONLY valid JSON:
+{{
+  "recruitment_strategy": "fast_track|standard_recruitment|bulk_hiring|specialized_search|executive_search",
+  "next_action": "sourcing|outreach|monitor|complete",
+  "reasoning": ["reason1", "reason2"],
+  "priority_level": "high|medium|low",
+  "estimated_timeline": "X weeks"
+}}"""
+
+    @staticmethod
+    def generate_report_prompt(campaign_data: dict, pipeline_metrics: dict, performance_data: dict) -> str:
+        """Prompt for generating a comprehensive recruitment report."""
+        return f"""# RECRUITMENT CAMPAIGN ANALYST
+
+Generate comprehensive recruitment campaign report.
+
+Campaign Data: {campaign_data}
+Pipeline Metrics: {pipeline_metrics}
+Performance Data: {performance_data}
+
+Return ONLY valid JSON:
+{{
+  "report_id": "recruitment_report_YYYYMMDD",
+  "executive_summary": {{
+    "campaign_status": "successful|in_progress|needs_attention|failed",
+    "overall_grade": "A|B|C|D|F"
+  }},
+  "recommendations": {{
+    "immediate_actions": ["action1", "action2"],
+    "process_improvements": ["improvement1"]
+  }}
+}}"""
+
+    @staticmethod
+    def monitor_progress_prompt(pipeline_data: dict, sourcing_status: dict, outreach_status: dict) -> str:
+        """Prompt for monitoring and assessing recruitment campaign progress."""
+        return f"""# RECRUITMENT PROGRESS MONITOR
+
+Assess current campaign progress and determine if intervention is needed.
+
+Pipeline: {pipeline_data}
+Sourcing: {sourcing_status}
+Outreach: {outreach_status}
+
+Return ONLY valid JSON:
+{{
+  "monitoring_summary": {{
+    "overall_health": "excellent|good|fair|poor",
+    "intervention_needed": true,
+    "urgency_level": "critical|high|medium|low"
+  }},
+  "immediate_actions": ["action1"],
+  "success_predictions": {{
+    "probability_of_success": "XX%",
+    "estimated_completion": "X weeks"
+  }}
+}}"""
+
+# agents imports (legacy - kept for backward compatibility)
 try:
     from agents.sourcing_manager_unified import UnifiedSourcingManager
 except ImportError:
@@ -135,44 +304,30 @@ try:
 except ImportError:
     OutreachManager = None
 
-# Logging
-logger = logging.getLogger('RecruitmentExecutiveAgent')
-logging.basicConfig(level=logging.INFO)
+# Logging - refactored to use centralized logger
+logger = get_logger('RecruitmentExecutiveAgent')
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION - REFACTORED
 # ============================================================================
 
 def get_ai_config() -> Dict[str, Any]:
     """
     Get AI model configuration from environment variables.
     
-    Loads OpenAI API configuration from environment variables with sensible
-    defaults. This function centralizes configuration loading to ensure
-    consistency across the agent system.
+    REFACTORED: Now uses ConfigService instead of direct os.getenv() calls.
+    Kept for backward compatibility with existing code.
     
     Returns:
-        Dict containing AI configuration:
-            - openai_api_key: OpenAI API key (from OPENAI_API_KEY env var)
-            - model: Model name (default: 'gpt-4')
-            - temperature: Sampling temperature (default: 0.3)
-            - max_tokens: Maximum tokens per request (default: 2000)
+        Dict containing AI configuration from ConfigService
     
     Example:
         >>> config = get_ai_config()
         >>> print(config['model'])
-        'gpt-4'
-    
-    Note:
-        Environment variables should be set in .env file or system environment.
-        Missing values will use defaults where applicable.
+        'gpt-5'
     """
-    return {
-        'openai_api_key': os.getenv('OPENAI_API_KEY'),
-        'model': os.getenv('OPENAI_MODEL', 'gpt-4'),
-        'temperature': float(os.getenv('OPENAI_TEMPERATURE', '0.3')),
-        'max_tokens': int(os.getenv('OPENAI_MAX_TOKENS', '2000'))
-    }
+    config_service = ConfigService.get_instance()
+    return config_service.get_llm_config()
 
 # ============================================================================
 # STATE DEFINITIONS
@@ -313,28 +468,18 @@ class RecruitmentExecutiveAgent:
         """
         Initialize the Recruitment Executive Agent.
         
-        Sets up the agent with initial state, configuration, and manager agents.
-        Manager agents are initialized lazily to avoid circular dependencies.
+        REFACTORED: Now uses centralized services (LLMService, DatabaseService, ConfigService)
+        instead of direct initialization. Backward compatible with old API.
         
         Args:
             state: Optional initial state. If None, creates default empty state.
-            config: Optional AI configuration. If None, loads from environment.
-        
-        Raises:
-            No exceptions raised. Initialization failures are logged as warnings
-            and the agent continues with reduced functionality.
+            config: Optional AI configuration. If None, loads from ConfigService.
         
         Example:
-            >>> # Default initialization
             >>> agent = RecruitmentExecutiveAgent()
-            >>> 
-            >>> # With custom state
-            >>> custom_state = {
-            ...     'user_request': 'Find developer',
-            ...     'candidate_pipeline': {'sourced': []}
-            ... }
             >>> agent = RecruitmentExecutiveAgent(state=custom_state)
         """
+        # Initialize state (unchanged)
         self.state = state or {
             'messages': [],
             'user_request': '',
@@ -350,73 +495,69 @@ class RecruitmentExecutiveAgent:
             'parsed_requirements': None,
             'project_creation_result': None
         }
-        self.config = config or get_ai_config()
-        self.logger = logging.getLogger('RecruitmentExecutiveAgent')
-        self.logger.setLevel(logging.DEBUG)
         
-        # Lazy load managers to avoid circular imports
+        # REFACTORED: Use centralized services
+        self.config_service = ConfigService.get_instance()
+        self.config = config or self.config_service.get_llm_config()
+        self.llm_service = LLMService()
+        # Initialize DatabaseService with config values to avoid localhost fallback
+        db_cfg = self.config_service.get_database_config() or {}
+        self.db_service = DatabaseService.get_instance(
+            uri=db_cfg.get('uri', 'mongodb://localhost:27017'),
+            database=db_cfg.get('name', 'AIrecruiter'),
+            timeout_ms=db_cfg.get('timeout_ms', 10000)
+        )
+        
+        # Backward compatibility: expose llm_service.client as self.llm
+        self.llm = self.llm_service.client
+        
+        # Logger (refactored to use get_logger)
+        self.logger = get_logger('RecruitmentExecutiveAgent')
+        
+        # Lazy load legacy managers for backward compatibility
         self.sourcing_manager = None
         self.database_agent = None
         self.outreach_manager = None
         self._initialize_managers()
+        
+        self.logger.info("✅ RecruitmentExecutiveAgent initialized (using clean architecture services)")
     
     def _initialize_managers(self) -> None:
         """
-        Initialize manager agents using lazy loading pattern.
+        Initialize legacy manager agents for backward compatibility.
         
-        Attempts to initialize all manager agents (SourcingManager, DatabaseAgent,
-        OutreachManager). If initialization fails for any manager, logs a warning
-        and continues. This ensures graceful degradation if dependencies are
-        unavailable.
+        REFACTORED: Simplified initialization since most operations now go through
+        services (DatabaseService, LLMService). Managers kept for backward compatibility
+        with existing code that may call them directly.
         
         Design Pattern:
-            - Lazy Initialization: Managers loaded on-demand
-            - Dependency Injection: Managers injected, not hard-coded
             - Graceful Degradation: System continues if managers unavailable
-        
-        Side Effects:
-            - Sets self.sourcing_manager if UnifiedSourcingManager available
-            - Sets self.database_agent if DatabaseAgent available
-            - Sets self.outreach_manager if OutreachManager available
-            - Logs warnings for any initialization failures
-        
-        Note:
-            This method is called during __init__ and should not be called
-            directly by external code.
+            - Backward Compatibility: Existing code can still use managers
         """
         try:
             if UnifiedSourcingManager:
                 self.sourcing_manager = UnifiedSourcingManager(
-                    model_name=self.config.get('model', 'gpt-4'),
+                    model_name=self.config.get('model', 'gpt-5'),
                     temperature=self.config.get('temperature', 0.3)
                 )
+                self.logger.debug("✅ UnifiedSourcingManager initialized")
         except Exception as e:
-            self.logger.warning(f"Could not initialize SourcingManager: {e}")
+            self.logger.warning(f"⚠️ Could not initialize SourcingManager: {e}")
         
         try:
             if DatabaseAgent:
-                # DatabaseAgent requires a state parameter
-                from agents.database_agent import DatabaseAgentState
-                db_state = DatabaseAgentState(
-                    name="RecruitmentExecutive_DatabaseAgent",
-                    description="Database operations for recruitment executive",
-                    tools=[], tool_descriptions=[], tool_input_types=[], tool_output_types=[],
-                    input_type="dict", output_type="dict", intermediate_steps=[],
-                    max_iterations=5, iteration_count=0, stop=False,
-                    last_action="", last_observation="", last_input="", last_output="",
-                    graph=None, memory=[], memory_limit=100, verbose=False,
-                    temperature=0.7, top_k=50, top_p=0.9, frequency_penalty=0.0, presence_penalty=0.0,
-                    best_of=1, n=1, logit_bias={}, seed=42, model="gpt-4", api_key=""
-                )
-                self.database_agent = DatabaseAgent(db_state)
+                # Simplified: DatabaseAgent now just wraps DatabaseService
+                self.database_agent = DatabaseAgent()
+                self.logger.debug("✅ DatabaseAgent initialized (wrapper)")
         except Exception as e:
-            self.logger.warning(f"Could not initialize DatabaseAgent: {e}")
+            self.logger.warning(f"⚠️ Could not initialize DatabaseAgent: {e}")
         
         try:
             if OutreachManager:
                 self.outreach_manager = OutreachManager()
+                self.logger.debug("✅ OutreachManager initialized")
         except Exception as e:
-            self.logger.warning(f"Could not initialize OutreachManager: {e}")
+            self.logger.warning(f"⚠️ Could not initialize OutreachManager: {e}")
 
 
     def process_request_node(self, state: RecruitmentExecutiveState) -> RecruitmentExecutiveState:
@@ -645,6 +786,8 @@ class RecruitmentExecutiveAgent:
     def _process_user_request(self, state: RecruitmentExecutiveState, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process a frontend user recruitment request.
         
+        REFACTORED: Now delegates to ProcessRecruitmentRequestUseCase.
+        
         Args:
             state: Current state
             request_data: Extracted request information
@@ -654,49 +797,57 @@ class RecruitmentExecutiveAgent:
         """
         self.logger.info("👤 Processing frontend user request...")
         
-        # Get user request from various possible fields
-        user_request = (
-            request_data.get("user_requirements", "") or
-            request_data.get("request", "") or
-            request_data.get("content", "")
-        )
-        
-        # Validate user request
-        if not user_request or len(user_request.strip()) < 3:
+        try:
+            # Get user request from various possible fields
+            user_request = (
+                request_data.get("user_requirements", "") or
+                request_data.get("request", "") or
+                request_data.get("content", "")
+            )
+            
+            # Delegate to use case
+            use_case = ProcessRecruitmentRequestUseCase(
+                db_service=self.db_service,
+                llm_service=self.llm_service
+            )
+            
+            # Execute use case (async)
+            import asyncio
+            result = asyncio.run(use_case.execute_user_request(user_request))
+            
+            # Transform use case result to expected format
+            return {
+                "processing_result": result.get("processing_result"),
+                "user_request": [result.get("user_request")],
+                "parsed_requirements": result.get("parsed_requirements"),
+                "project_creation_needed": result.get("project_creation_needed"),
+                "project_created": result.get("project_created", False),
+                "project_id": result.get("project_id"),
+                "reasoning": [
+                    "User request delegated to ProcessRecruitmentRequestUseCase",
+                    f"Project created: {result.get('project_created', False)}"
+                ]
+            }
+            
+        except ValidationError as e:
+            self.logger.warning(f"⚠️ Validation error: {e}")
             return {
                 "processing_result": "validation_failed",
-                "reasoning": ["User request is too short or empty"],
-                "human_review_required": True,
-                "user_request": [user_request]
+                "reasoning": [str(e)],
+                "human_review_required": True
             }
-        
-        # Parse user requirements using AI
-        parsed_requirements = self._parse_user_requirements(user_request)
-        
-        # Check if we need to create a new project via Database Agent
-        project_needed = self._assess_project_creation_need(parsed_requirements)
-        
-        result = {
-            "processing_result": "user_request_processed",
-            "user_request": [user_request],
-            "parsed_requirements": parsed_requirements,
-            "project_creation_needed": project_needed,
-            "reasoning": [
-                f"User request parsed successfully",
-                f"Requirements extracted: {len(parsed_requirements)} items",
-                f"Project creation needed: {project_needed}"
-            ]
-        }
-        
-        # If new project needed, delegate to Database Agent
-        if project_needed:
-            project_result = self._delegate_project_creation(parsed_requirements)
-            result["project_creation_result"] = project_result
-        
-        return result
+        except Exception as e:
+            self.logger.error(f"❌ Error processing user request: {e}")
+            return {
+                "processing_result": "error",
+                "reasoning": [f"Processing failed: {str(e)}"],
+                "human_review_required": True
+            }
     
     def _process_linkedin_project(self, state: RecruitmentExecutiveState, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process a LinkedIn API project creation request.
+        
+        REFACTORED: Now delegates to ProcessRecruitmentRequestUseCase.
         
         Args:
             state: Current state
@@ -707,36 +858,46 @@ class RecruitmentExecutiveAgent:
         """
         self.logger.info("🔗 Processing LinkedIn API project...")
         
-        project_data = request_data.get("project_data", {})
-        
-        # Validate LinkedIn project data
-        validation_result = self._validate_linkedin_project(project_data)
-        if not validation_result["valid"]:
+        try:
+            project_data = request_data.get("project_data", {})
+            
+            # Delegate to use case
+            use_case = ProcessRecruitmentRequestUseCase(
+                db_service=self.db_service,
+                llm_service=self.llm_service
+            )
+            
+            # Execute use case (async)
+            import asyncio
+            result = asyncio.run(use_case.execute_linkedin_project(project_data))
+            
+            # Transform use case result to expected format
+            return {
+                "processing_result": result.get("processing_result"),
+                "project_id": result.get("project_id"),
+                "linkedin_search_id": result.get("linkedin_search_id"),
+                "project_created": result.get("project_created", False),
+                "reasoning": [
+                    "LinkedIn project delegated to ProcessRecruitmentRequestUseCase",
+                    f"Project created: {result.get('project_created', False)}",
+                    f"Project ID: {result.get('project_id')}"
+                ]
+            }
+            
+        except ValidationError as e:
+            self.logger.warning(f"⚠️ Validation error: {e}")
             return {
                 "processing_result": "validation_failed",
-                "reasoning": validation_result["errors"],
+                "reasoning": [str(e)],
                 "human_review_required": True
             }
-        
-        # Transform LinkedIn data to internal project format
-        internal_project = self._transform_linkedin_project(project_data)
-        
-        # Delegate project storage to Database Agent
-        storage_result = self._delegate_project_storage(internal_project)
-        
-        result = {
-            "processing_result": "linkedin_project_processed",
-            "linkedin_project_data": project_data,
-            "internal_project_data": internal_project,
-            "storage_result": storage_result,
-            "reasoning": [
-                "LinkedIn project data validated",
-                "Project transformed to internal format",
-                f"Storage result: {storage_result.get('success', False)}"
-            ]
-        }
-        
-        return result
+        except Exception as e:
+            self.logger.error(f"❌ Error processing LinkedIn project: {e}")
+            return {
+                "processing_result": "error",
+                "reasoning": [f"Processing failed: {str(e)}"],
+                "human_review_required": True
+            }
     
     def _handle_unknown_request(self, state: RecruitmentExecutiveState, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """Handle requests that don't match expected patterns.
@@ -761,271 +922,9 @@ class RecruitmentExecutiveAgent:
             "raw_request_data": request_data
         }
     
-    def _parse_user_requirements(self, user_request: str) -> Dict[str, Any]:
-        """Parse user requirements using AI to extract structured information.
-        
-        Args:
-            user_request: Raw user request string
-            
-        Returns:
-            Dictionary with parsed requirements
-        """
-        # Simple parsing logic (can be enhanced with LLM)
-        requirements = {
-            "position": "",
-            "skills": [],
-            "location": "",
-            "experience_level": "",
-            "urgency": "normal",
-            "quantity": 1,
-            "raw_request": user_request
-        }
-        
-        request_lower = user_request.lower()
-        
-        # Extract position
-        position_keywords = ["developer", "engineer", "scientist", "manager", "analyst", "designer"]
-        for keyword in position_keywords:
-            if keyword in request_lower:
-                requirements["position"] = keyword.title()
-                break
-        
-        # Extract skills
-        skill_keywords = ["python", "javascript", "react", "django", "sql", "machine learning", "aws", "docker"]
-        for skill in skill_keywords:
-            if skill in request_lower:
-                requirements["skills"].append(skill.title())
-        
-        # Extract location
-        location_keywords = ["amsterdam", "rotterdam", "utrecht", "remote", "hybrid"]
-        for location in location_keywords:
-            if location in request_lower:
-                requirements["location"] = location.title()
-                break
-        
-        # Extract urgency
-        if any(word in request_lower for word in ["urgent", "asap", "immediately"]):
-            requirements["urgency"] = "urgent"
-        
-        return requirements
-    
-    def _assess_project_creation_need(self, requirements: Dict[str, Any]) -> bool:
-        """Assess if a new project needs to be created for this request.
-        
-        Args:
-            requirements: Parsed user requirements
-            
-        Returns:
-            Boolean indicating if new project creation is needed
-        """
-        # Check if we have enough information for a project
-        has_position = bool(requirements.get("position"))
-        has_location = bool(requirements.get("location"))
-        
-        # Always create project for new user requests with basic info
-        return has_position or has_location
-    
-    def _delegate_project_creation(self, requirements: Dict[str, Any]) -> Dict[str, Any]:
-        """Delegate project creation to Database Agent.
-        
-        Args:
-            requirements: Parsed user requirements
-            
-        Returns:
-            Dictionary with project creation results
-        """
-        self.logger.info("📤 Delegating project creation to Database Agent...")
-        
-        try:
-            # Import Database Agent (avoid circular imports)
-            from agents.database_agent import DatabaseAgent, DatabaseAgentState
-            
-            # Initialize Database Agent with state
-            db_state = DatabaseAgentState(
-                name="ProjectStorage_DatabaseAgent",
-                description="Database operations for project storage",
-                tools=[], tool_descriptions=[], tool_input_types=[], tool_output_types=[],
-                input_type="dict", output_type="dict", intermediate_steps=[],
-                max_iterations=5, iteration_count=0, stop=False,
-                last_action="", last_observation="", last_input="", last_output="",
-                graph=None, memory=[], memory_limit=100, verbose=False,
-                temperature=0.7, top_k=50, top_p=0.9, frequency_penalty=0.0, presence_penalty=0.0,
-                best_of=1, n=1, logit_bias={}, seed=42, model="gpt-4", api_key=""
-            )
-            db_agent = DatabaseAgent(db_state)
-            
-            # Prepare project data
-            project_data = {
-                "title": f"{requirements.get('position', 'Position')} - {requirements.get('location', 'Location')}",
-                "project_id": f"REQ-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-                "company": "Internal Request",
-                "description": requirements.get("raw_request", ""),
-                "requirements": requirements.get("raw_request", ""),
-                "skills_needed": requirements.get("skills", []),
-                "location": requirements.get("location", ""),
-                "job_type": "Full-time",
-                "status": "active",
-                "urgency": requirements.get("urgency", "normal"),
-                "source": "frontend_user"
-            }
-            
-            # Validate project structure first
-            from tools.database_agent_tools import validate_project_structure
-            validation_result = validate_project_structure.invoke({"project_data": project_data})
-            
-            if not validation_result.get("valid", False):
-                return {
-                    "success": False,
-                    "error": validation_result.get("error", "Project validation failed"),
-                    "message": "Project data validation failed"
-                }
-            
-            # Create project via Database Agent tools
-            # Note: create_project is decorated with @tool, but has self.logger reference
-            # We'll use validate_and_structure_project directly and handle DB operations
-            try:
-                # Use the instance method directly (not the tool-wrapped version)
-                structured_project = db_agent.tools.validate_and_structure_project(project_data)
-                
-                # For now, return success without actual DB write (requires MongoDB connection)
-                # In production, this would call the actual create_project tool properly
-                creation_result = {
-                    "success": True,
-                    "project_id": structured_project.get("project_id", structured_project.get("_id", "unknown")),
-                    "action": "validated",
-                    "message": "Project structure validated (DB write skipped - requires MongoDB connection)"
-                }
-            except Exception as e:
-                creation_result = {
-                    "success": False,
-                    "error": str(e),
-                    "message": "Failed to create project"
-                }
-            
-            self.logger.info(f"📋 Project creation result: {creation_result.get('success', False)}")
-            return creation_result
-            
-        except Exception as e:
-            self.logger.error(f"❌ Project creation delegation failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "message": "Failed to delegate project creation"
-            }
-    
-    def _validate_linkedin_project(self, project_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate LinkedIn project data structure.
-        
-        Args:
-            project_data: Raw LinkedIn project data
-            
-        Returns:
-            Dictionary with validation results
-        """
-        errors = []
-        
-        # Check required LinkedIn fields
-        required_fields = ["id", "title"]
-        for field in required_fields:
-            if not project_data.get(field):
-                errors.append(f"Missing required field: {field}")
-        
-        # Check data types
-        if project_data.get("title") and not isinstance(project_data["title"], str):
-            errors.append("Title must be a string")
-        
-        return {
-            "valid": len(errors) == 0,
-            "errors": errors
-        }
-    
-    def _transform_linkedin_project(self, linkedin_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Transform LinkedIn project data to internal project format.
-        
-        Args:
-            linkedin_data: Raw LinkedIn project data
-            
-        Returns:
-            Dictionary in internal project format
-        """
-        # Extract additional data if present
-        additional_data = linkedin_data.get("additional_data", {})
-        
-        return {
-            "title": linkedin_data.get("title", "LinkedIn Project"),
-            "project_id": linkedin_data.get("id", f"LI-{datetime.now().strftime('%Y%m%d-%H%M%S')}"),
-            "company": additional_data.get("company", "LinkedIn Source"),
-            "description": linkedin_data.get("description", "Project created via LinkedIn API"),
-            "requirements": additional_data.get("requirements", ""),
-            "skills_needed": additional_data.get("skills", []),
-            "location": additional_data.get("location", ""),
-            "job_type": additional_data.get("job_type", "Full-time"),
-            "status": "active",
-            "urgency": additional_data.get("urgency", "normal"),
-            "source": "linkedin_api",
-            "linkedin_search_id": linkedin_data.get("id", ""),
-            "linkedin_search_parameters": linkedin_data
-        }
-    
-    def _delegate_project_storage(self, project_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Delegate project storage to Database Agent.
-        
-        Args:
-            project_data: Internal project data to store
-            
-        Returns:
-            Dictionary with storage results
-        """
-        self.logger.info("📤 Delegating project storage to Database Agent...")
-        
-        try:
-            # Import Database Agent
-            from agents.database_agent import DatabaseAgent, DatabaseAgentState
-            
-            # Initialize Database Agent with state
-            db_state = DatabaseAgentState(
-                name="ProjectStorage_DatabaseAgent",
-                description="Database operations for project storage",
-                tools=[], tool_descriptions=[], tool_input_types=[], tool_output_types=[],
-                input_type="dict", output_type="dict", intermediate_steps=[],
-                max_iterations=5, iteration_count=0, stop=False,
-                last_action="", last_observation="", last_input="", last_output="",
-                graph=None, memory=[], memory_limit=100, verbose=False,
-                temperature=0.7, top_k=50, top_p=0.9, frequency_penalty=0.0, presence_penalty=0.0,
-                best_of=1, n=1, logit_bias={}, seed=42, model="gpt-4", api_key=""
-            )
-            db_agent = DatabaseAgent(db_state)
-            
-            # Store project via Database Agent tools
-            try:
-                # Use the instance method directly (not the tool-wrapped version)
-                structured_project = db_agent.tools.validate_and_structure_project(project_data)
-                
-                # For now, return success without actual DB write (requires MongoDB connection)
-                # In production, this would call the actual create_project tool properly
-                storage_result = {
-                    "success": True,
-                    "project_id": structured_project.get("project_id", structured_project.get("_id", "unknown")),
-                    "action": "validated",
-                    "message": "Project structure validated (DB write skipped - requires MongoDB connection)"
-                }
-            except Exception as e:
-                storage_result = {
-                    "success": False,
-                    "error": str(e),
-                    "message": "Failed to store project"
-                }
-            
-            self.logger.info(f"💾 Project storage result: {storage_result.get('success', False)}")
-            return storage_result
-            
-        except Exception as e:
-            self.logger.error(f"❌ Project storage delegation failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "message": "Failed to delegate project storage"
-            }
+    # ============================================================================
+    # WORKFLOW NODES - LangGraph integration
+    # ============================================================================
 
     def analyze_request_node(self, state: RecruitmentExecutiveState) -> RecruitmentExecutiveState:
         """Analyze the user request and extract requirements."""
@@ -1057,24 +956,68 @@ class RecruitmentExecutiveAgent:
         return state
     
     def get_projects_node(self, state: RecruitmentExecutiveState) -> RecruitmentExecutiveState:
-        """Retrieve relevant projects from the database."""
-        logger.info(" Retrieving projects...")
+        """Retrieve relevant projects from the database via DatabaseAgent."""
+        logger.info("📋 Retrieving projects via DatabaseAgent...")
         
         try:
-            # Get all projects with fallback
-            projects = get_all_projects(use_mongodb=False, fallback=True)
+            # Initialize DatabaseAgent to retrieve projects
+            from agents.database_agent import DatabaseAgent, DatabaseAgentState
+            
+            # Create DatabaseAgent state
+            db_state = DatabaseAgentState(
+                name="ProjectRetrieval_DatabaseAgent",
+                description="Database operations for project retrieval",
+                tools=[], tool_descriptions=[], tool_input_types=[], tool_output_types=[],
+                input_type="dict", output_type="dict", intermediate_steps=[],
+                max_iterations=5, iteration_count=0, stop=False,
+                last_action="", last_observation="", last_input="", last_output="",
+                graph=None, memory=[], memory_limit=100, verbose=False,
+                temperature=0.7, top_k=50, top_p=0.9, frequency_penalty=0.0, presence_penalty=0.0,
+                best_of=1, n=1, logit_bias={}, seed=42, model=os.getenv("OPENAI_MODEL", "gpt-5"), api_key=""
+            )
+            
+            db_agent = DatabaseAgent(db_state)
+            
+            # Retrieve projects via DatabaseAgent (all projects, no filter)
+            projects = db_agent.list_projects()
+            
+            # Sync each project with LinkedIn to get fresh data
+            logger.info(f"🔄 Syncing {len(projects)} projects with LinkedIn...")
+            synced_projects = []
+            for project in projects:
+                try:
+                    project_id = project.get('project_id', project.get('_id'))
+                    if project_id:
+                        synced_project = db_agent.sync_project_with_linkedin(project_id)
+                        synced_projects.append(synced_project)
+                    else:
+                        logger.warning(f"⚠️ Project missing project_id, skipping sync: {project}")
+                        synced_projects.append(project)
+                except Exception as sync_error:
+                    logger.error(f"❌ Failed to sync project {project.get('project_id')}: {sync_error}")
+                    # Keep original project if sync fails
+                    synced_projects.append(project)
             
             # Convert to standardized format
-            formatted_projects = [convert_project_to_json(project) for project in projects]
+            formatted_projects = [convert_project_to_json(project) for project in synced_projects]
             
             state["current_projects"] = formatted_projects
             state["next_action"] = "plan_strategy"
             
-            logger.info(f" Retrieved {len(formatted_projects)} projects")
+            logger.info(f"✅ Retrieved and synced {len(formatted_projects)} projects via DatabaseAgent")
             
         except Exception as e:
-            logger.error(f" Error retrieving projects: {e}")
-            state["current_projects"] = []
+            logger.warning(f"⚠️ Could not retrieve projects via DatabaseAgent: {e}")
+            logger.info("Fallback: Using legacy get_all_projects...")
+            try:
+                # Fallback to legacy method for backward compatibility
+                projects = get_all_projects(use_mongodb=False, fallback=True)
+                formatted_projects = [convert_project_to_json(project) for project in projects]
+                state["current_projects"] = formatted_projects
+            except Exception as fallback_e:
+                logger.error(f"❌ Error retrieving projects (both DatabaseAgent and fallback failed): {fallback_e}")
+                state["current_projects"] = []
+            
             state["next_action"] = "plan_strategy"
         
         return state
@@ -1130,14 +1073,11 @@ class RecruitmentExecutiveAgent:
         self.logger.info("🔍 Delegating to Sourcing Manager...")
         
         try:
-            # Extract information needed for sourcing
-            sourcing_requirements = self._prepare_sourcing_requirements(state)
+            # REFACTORED: Use ExecuteSourcingWorkflowUseCase
+            use_case = ExecuteSourcingWorkflowUseCase(sourcing_manager=self.sourcing_manager)
             
-            # Delegate to Sourcing Manager
-            sourcing_results = self._delegate_to_sourcing_manager(sourcing_requirements)
-            
-            # Process and validate sourcing results
-            processed_results = self._process_sourcing_results(sourcing_results)
+            import asyncio
+            processed_results = asyncio.run(use_case.execute(state))
             
             # Update candidate pipeline with sourced candidates
             if not state.get("candidate_pipeline"):
@@ -1196,14 +1136,11 @@ class RecruitmentExecutiveAgent:
         self.logger.info("📤 Delegating to Outreach Manager...")
         
         try:
-            # Prepare outreach campaign data
-            outreach_campaign = self._prepare_outreach_campaign(state)
+            # REFACTORED: Use ExecuteOutreachCampaignUseCase
+            use_case = ExecuteOutreachCampaignUseCase(outreach_manager=self.outreach_manager)
             
-            # Delegate to Outreach Manager
-            outreach_results = self._delegate_to_outreach_manager(outreach_campaign)
-            
-            # Process outreach results
-            processed_outreach = self._process_outreach_results(outreach_results)
+            import asyncio
+            processed_outreach = asyncio.run(use_case.execute(state))
             
             # Update candidate pipeline
             pipeline = state.get("candidate_pipeline", {})
@@ -1258,50 +1195,51 @@ class RecruitmentExecutiveAgent:
         self.logger.info("📊 Monitoring recruitment progress...")
         
         try:
-            # Monitor sourcing progress
-            sourcing_status = self._monitor_sourcing_progress(state)
+            # REFACTORED: Use MonitorProgressUseCase
+            use_case = MonitorProgressUseCase()
+            import asyncio
+            monitoring_results = asyncio.run(use_case.execute(state))
             
-            # Monitor outreach progress
-            outreach_status = self._monitor_outreach_progress(state)
-            
-            # Calculate overall progress metrics
-            progress_metrics = self._calculate_progress_metrics(state, sourcing_status, outreach_status)
+            # Extract results from use case
+            monitoring_data = monitoring_results.get("monitoring_results", {})
+            next_action = monitoring_results.get("next_action", "report")
             
             # Update state with monitoring results
-            state["monitoring_results"] = {
-                "sourcing_status": sourcing_status,
-                "outreach_status": outreach_status,
-                "progress_metrics": progress_metrics,
-                "last_monitored": datetime.now().isoformat()
-            }
+            state["monitoring_results"] = monitoring_data
             
-            # Determine if intervention is needed
-            intervention_needed = self._assess_intervention_need(progress_metrics)
-            
-            if intervention_needed:
-                state["next_action"] = "intervention"
-                state["human_review_required"] = True
-                state["reasoning"] = [
-                    "Monitoring detected issues requiring intervention",
-                    f"Sourcing status: {sourcing_status.get('status', 'unknown')}",
-                    f"Outreach status: {outreach_status.get('status', 'unknown')}"
-                ]
-            elif self._should_continue_monitoring(progress_metrics):
+            # Determine next action based on monitoring results
+            if monitoring_results.get("status") == "error":
+                state["next_action"] = "error"
+                state["reasoning"] = [f"Progress monitoring failed: {monitoring_results.get('error', 'Unknown error')}"]
+            elif next_action == "report":
+                # Check if intervention needed
+                needs_intervention = monitoring_data.get("needs_intervention", False)
+                if needs_intervention:
+                    state["next_action"] = "intervention"
+                    state["human_review_required"] = True
+                    state["reasoning"] = [
+                        "Monitoring detected issues requiring intervention",
+                        f"Pipeline health: {monitoring_data.get('progress_metrics', {}).get('pipeline_health', 'unknown')}"
+                    ]
+                else:
+                    state["next_action"] = "complete"
+                    progress_metrics = monitoring_data.get("progress_metrics", {})
+                    state["reasoning"] = [
+                        "Monitoring completed - generating final report",
+                        f"Total candidates sourced: {progress_metrics.get('total_sourced', 0)}",
+                        f"Total responses: {progress_metrics.get('total_responded', 0)}"
+                    ]
+            else:  # continue
                 state["next_action"] = "monitor"
+                progress_metrics = monitoring_data.get("progress_metrics", {})
                 state["reasoning"] = [
                     "Monitoring continues - campaign in progress",
                     f"Response rate: {progress_metrics.get('response_rate', 0):.1f}%",
                     f"Pipeline health: {progress_metrics.get('pipeline_health', 'unknown')}"
                 ]
-            else:
-                state["next_action"] = "complete"
-                state["reasoning"] = [
-                    "Monitoring completed - campaign objectives met",
-                    f"Total candidates sourced: {progress_metrics.get('total_sourced', 0)}",
-                    f"Total responses: {progress_metrics.get('total_responded', 0)}"
-                ]
             
-            self.logger.info(f"📈 Monitoring completed: {progress_metrics.get('pipeline_health', 'unknown')} pipeline health")
+            pipeline_health = monitoring_data.get("progress_metrics", {}).get("pipeline_health", "unknown")
+            self.logger.info(f"📈 Monitoring completed: {pipeline_health} pipeline health")
             return state
             
         except Exception as e:
@@ -1309,649 +1247,6 @@ class RecruitmentExecutiveAgent:
             state["next_action"] = "error"
             state["reasoning"] = [f"Progress monitoring failed: {str(e)}"]
             return state
-    
-    
-    # ---- Manager Delegation Helper Methods ----
-    
-    def _prepare_sourcing_requirements(self, state: RecruitmentExecutiveState) -> Dict[str, Any]:
-        """Prepare requirements data for the Sourcing Manager.
-        
-        Args:
-            state: Current recruitment state
-            
-        Returns:
-            Dictionary with sourcing requirements
-        """
-        # Extract parsed requirements
-        parsed_reqs = state.get("parsed_requirements", {})
-        current_projects = state.get("current_projects", [])
-        
-        sourcing_requirements = {
-            "position": parsed_reqs.get("position", ""),
-            "skills": parsed_reqs.get("skills", []),
-            "location": parsed_reqs.get("location", ""),
-            "experience_level": parsed_reqs.get("experience_level", ""),
-            "urgency": parsed_reqs.get("urgency", "normal"),
-            "quantity": parsed_reqs.get("quantity", 5),  # Default to 5 candidates
-            "projects": current_projects,
-            "strategy": state.get("recruitment_strategy", "standard_recruitment"),
-            "budget_constraints": {
-                "max_candidates_to_source": 20,
-                "preferred_sources": ["linkedin", "github", "referrals"]
-            }
-        }
-        
-        return sourcing_requirements
-    
-    def _delegate_to_sourcing_manager(self, requirements: Dict[str, Any]) -> Dict[str, Any]:
-        """Delegate sourcing tasks to the Sourcing Manager Agent.
-        
-        Args:
-            requirements: Sourcing requirements dictionary
-            
-        Returns:
-            Dictionary with sourcing results
-        """
-        try:
-            self.logger.info("📤 Initiating Sourcing Manager delegation...")
-            
-            # Import Sourcing Manager (avoid circular imports)
-            from agents.scourcing_manager import SourcingManagerAgent
-            
-            # Initialize Sourcing Manager
-            sourcing_manager = SourcingManagerAgent()
-            
-            # Execute sourcing workflow
-            sourcing_result = sourcing_manager.execute_sourcing_workflow(requirements)
-            
-            self.logger.info(f"📊 Sourcing Manager returned: {sourcing_result.get('status', 'unknown')}")
-            return sourcing_result
-            
-        except ImportError:
-            # Fallback if SourcingManager not implemented yet
-            self.logger.warning("⚠️ SourcingManager not available, using mock results")
-            return self._mock_sourcing_results(requirements)
-        except Exception as e:
-            self.logger.error(f"❌ Sourcing Manager delegation failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "candidates": [],
-                "status": "failed"
-            }
-    
-    def _mock_sourcing_results(self, requirements: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate mock sourcing results for testing purposes.
-        
-        Args:
-            requirements: Sourcing requirements
-            
-        Returns:
-            Mock sourcing results
-        """
-        position = requirements.get("position", "Developer")
-        skills = requirements.get("skills", ["Python"])
-        location = requirements.get("location", "Amsterdam")
-        quantity = requirements.get("quantity", 5)
-        
-        mock_candidates = []
-        for i in range(min(quantity, 3)):  # Generate up to 3 mock candidates
-            candidate = {
-                "name": f"Candidate {i+1}",
-                "email": f"candidate{i+1}@example.com",
-                "position": f"Senior {position}",
-                "skills": skills + [f"Skill{i+1}"],
-                "experience": f"{3+i} years",
-                "location": location,
-                "source": "mock_linkedin",
-                "fit_score": 85 - (i * 5),
-                "availability": "Available",
-                "contact_info": {
-                    "linkedin": f"linkedin.com/in/candidate{i+1}",
-                    "phone": f"+31 6 1234 567{i}"
-                }
-            }
-            mock_candidates.append(candidate)
-        
-        return {
-            "success": True,
-            "candidates": mock_candidates,
-            "status": "completed",
-            "metrics": {
-                "total_searched": quantity * 10,
-                "total_found": len(mock_candidates),
-                "average_fit_score": sum(c["fit_score"] for c in mock_candidates) / len(mock_candidates) if mock_candidates else 0,
-                "sources_used": ["linkedin", "github"],
-                "search_duration": "2.5 hours"
-            }
-        }
-    
-    def _process_sourcing_results(self, sourcing_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Process and validate sourcing results from Sourcing Manager.
-        
-        Args:
-            sourcing_results: Raw results from Sourcing Manager
-            
-        Returns:
-            Processed and validated results
-        """
-        candidates = sourcing_results.get("candidates", [])
-        
-        # Validate and enrich candidate data
-        processed_candidates = []
-        for candidate in candidates:
-            if self._validate_candidate_data(candidate):
-                # Enrich with additional metadata
-                enriched_candidate = {
-                    **candidate,
-                    "sourced_at": datetime.now().isoformat(),
-                    "status": "sourced",
-                    "pipeline_stage": "sourced",
-                    "next_action": "outreach"
-                }
-                processed_candidates.append(enriched_candidate)
-        
-        return {
-            "success": len(processed_candidates) > 0,
-            "candidates": processed_candidates,
-            "status": "completed" if processed_candidates else "low_results",
-            "metrics": sourcing_results.get("metrics", {}),
-            "quality_score": self._calculate_candidate_quality_score(processed_candidates)
-        }
-    
-    def _validate_candidate_data(self, candidate: Dict[str, Any]) -> bool:
-        """Validate individual candidate data structure.
-        
-        Args:
-            candidate: Candidate data dictionary
-            
-        Returns:
-            Boolean indicating if candidate data is valid
-        """
-        required_fields = ["name", "email", "skills"]
-        return all(candidate.get(field) for field in required_fields)
-    
-    def _calculate_candidate_quality_score(self, candidates: List[Dict[str, Any]]) -> float:
-        """Calculate overall quality score for sourced candidates.
-        
-        Args:
-            candidates: List of candidate dictionaries
-            
-        Returns:
-            Quality score between 0-100
-        """
-        if not candidates:
-            return 0.0
-        
-        total_score = 0
-        for candidate in candidates:
-            # Base score from fit_score
-            score = candidate.get("fit_score", 50)
-            
-            # Bonus for complete contact info
-            if candidate.get("contact_info", {}).get("linkedin"):
-                score += 10
-            if candidate.get("contact_info", {}).get("phone"):
-                score += 5
-            
-            # Bonus for availability
-            if candidate.get("availability") == "Available":
-                score += 10
-            
-            total_score += min(score, 100)  # Cap at 100
-        
-        return total_score / len(candidates)
-    
-    def _prepare_outreach_campaign(self, state: RecruitmentExecutiveState) -> Dict[str, Any]:
-        """Prepare outreach campaign data for the Outreach Manager.
-        
-        Args:
-            state: Current recruitment state
-            
-        Returns:
-            Dictionary with outreach campaign configuration
-        """
-        candidates = state.get("candidate_pipeline", {}).get("sourced", [])
-        parsed_reqs = state.get("parsed_requirements", {})
-        
-        campaign_config = {
-            "candidates": candidates,
-            "campaign_name": f"Recruitment_{datetime.now().strftime('%Y%m%d_%H%M')}",
-            "position_details": {
-                "title": parsed_reqs.get("position", "Position"),
-                "location": parsed_reqs.get("location", ""),
-                "urgency": parsed_reqs.get("urgency", "normal")
-            },
-            "outreach_strategy": {
-                "primary_channel": "linkedin",
-                "secondary_channel": "email",
-                "personalization_level": "high",
-                "follow_up_sequence": True,
-                "max_attempts": 3
-            },
-            "message_templates": {
-                "initial_contact": "professional_introduction",
-                "follow_up": "gentle_reminder",
-                "final_attempt": "last_chance"
-            },
-            "timing": {
-                "send_immediately": state.get("recruitment_strategy") == "fast_track",
-                "business_hours_only": True,
-                "timezone": "Europe/Amsterdam"
-            }
-        }
-        
-        return campaign_config
-    
-    def _delegate_to_outreach_manager(self, campaign_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Delegate outreach tasks to the Outreach Manager.
-        
-        Args:
-            campaign_config: Outreach campaign configuration
-            
-        Returns:
-            Dictionary with outreach results
-        """
-        try:
-            self.logger.info("📤 Initiating Outreach Manager delegation...")
-            
-            # Use initialized outreach manager or create new one
-            if not self.outreach_manager:
-                if OutreachManager:
-                    self.outreach_manager = OutreachManager()
-                else:
-                    raise ImportError("OutreachManager not available")
-            
-            # Execute outreach campaign
-            outreach_result = self.outreach_manager.execute_outreach_campaign(campaign_config)
-            
-            self.logger.info(f"📊 Outreach Manager returned: {outreach_result.get('status', 'unknown')}")
-            return outreach_result
-            
-        except (ImportError, AttributeError):
-            # Fallback if OutreachManager not available
-            self.logger.warning("⚠️ OutreachManager not available, using mock results")
-            return self._mock_outreach_results(campaign_config)
-        except Exception as e:
-            self.logger.error(f"❌ Outreach Manager delegation failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "contacted_candidates": [],
-                "status": "failed"
-            }
-    
-    def _mock_outreach_results(self, campaign_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate mock outreach results for testing purposes.
-        
-        Args:
-            campaign_config: Campaign configuration
-            
-        Returns:
-            Mock outreach results
-        """
-        candidates = campaign_config.get("candidates", [])
-        
-        # Simulate contacting candidates
-        contacted_candidates = []
-        responded_candidates = []
-        
-        for i, candidate in enumerate(candidates):
-            # Add outreach status to candidate
-            contacted_candidate = {
-                **candidate,
-                "contacted_at": datetime.now().isoformat(),
-                "contact_method": "linkedin",
-                "message_sent": True,
-                "outreach_status": "contacted"
-            }
-            contacted_candidates.append(contacted_candidate)
-            
-            # Simulate some responses (30% response rate)
-            if i < len(candidates) * 0.3:
-                responded_candidate = {
-                    **contacted_candidate,
-                    "responded_at": datetime.now().isoformat(),
-                    "response_type": "positive",
-                    "outreach_status": "responded"
-                }
-                responded_candidates.append(responded_candidate)
-        
-        return {
-            "success": True,
-            "contacted_candidates": contacted_candidates,
-            "responded_candidates": responded_candidates,
-            "status": "in_progress",
-            "campaigns": [{
-                "campaign_id": campaign_config.get("campaign_name", "mock_campaign"),
-                "status": "active",
-                "total_sent": len(contacted_candidates),
-                "total_responded": len(responded_candidates),
-                "response_rate": (len(responded_candidates) / len(contacted_candidates) * 100) if contacted_candidates else 0
-            }],
-            "metrics": {
-                "total_contacted": len(contacted_candidates),
-                "total_responded": len(responded_candidates),
-                "response_rate": (len(responded_candidates) / len(contacted_candidates) * 100) if contacted_candidates else 0,
-                "channels_used": ["linkedin", "email"],
-                "campaign_duration": "2 days"
-            },
-            "requires_monitoring": True
-        }
-    
-    def _process_outreach_results(self, outreach_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Process and validate outreach results from Outreach Manager.
-        
-        Args:
-            outreach_results: Raw results from Outreach Manager
-            
-        Returns:
-            Processed and validated results
-        """
-        contacted = outreach_results.get("contacted_candidates", [])
-        responded = outreach_results.get("responded_candidates", [])
-        
-        # Process contacted candidates
-        processed_contacted = []
-        for candidate in contacted:
-            processed_candidate = {
-                **candidate,
-                "pipeline_stage": "contacted",
-                "last_contact": candidate.get("contacted_at", datetime.now().isoformat())
-            }
-            processed_contacted.append(processed_candidate)
-        
-        # Process responded candidates - use OutreachManager's engagement scoring if available
-        processed_responded = []
-        for candidate in responded:
-            # Use outreach manager's engagement score if available, otherwise calculate here
-            engagement_score = candidate.get("engagement_score")
-            if engagement_score is None and self.outreach_manager:
-                engagement_score = self.outreach_manager._calculate_engagement_score(candidate)
-            elif engagement_score is None:
-                engagement_score = self._calculate_engagement_score_fallback(candidate)
-            
-            processed_candidate = {
-                **candidate,
-                "pipeline_stage": "responded",
-                "engagement_score": engagement_score
-            }
-            processed_responded.append(processed_candidate)
-        
-        return {
-            "success": len(processed_contacted) > 0,
-            "contacted_candidates": processed_contacted,
-            "responded_candidates": processed_responded,
-            "status": outreach_results.get("status", "completed"),
-            "campaigns": outreach_results.get("campaigns", []),
-            "metrics": outreach_results.get("metrics", {}),
-            "requires_monitoring": outreach_results.get("requires_monitoring", False)
-        }
-    
-    def _calculate_engagement_score_fallback(self, candidate: Dict[str, Any]) -> int:
-        """Fallback engagement score calculation (used when OutreachManager not available).
-        
-        Args:
-            candidate: Candidate with response data
-            
-        Returns:
-            Engagement score between 0-100
-        """
-        base_score = 50
-        
-        # Response type bonus
-        response_type = candidate.get("response_type", "neutral")
-        if response_type == "positive":
-            base_score += 30
-        elif response_type == "interested":
-            base_score += 40
-        elif response_type == "very_interested":
-            base_score += 50
-        
-        # Response speed bonus
-        contacted_at = candidate.get("contacted_at")
-        responded_at = candidate.get("responded_at")
-        if contacted_at and responded_at:
-            try:
-                contacted = datetime.fromisoformat(contacted_at.replace('Z', '+00:00'))
-                responded = datetime.fromisoformat(responded_at.replace('Z', '+00:00'))
-                time_diff = responded - contacted
-                
-                # Quick response bonus (within 24 hours)
-                if time_diff.total_seconds() < 86400:  # 24 hours
-                    base_score += 10
-            except (ValueError, AttributeError):
-                pass
-        
-        return min(base_score, 100)
-    
-    # ---- Progress Monitoring Methods ----
-    
-    def _monitor_sourcing_progress(self, state: RecruitmentExecutiveState) -> Dict[str, Any]:
-        """Monitor progress of sourcing operations.
-        
-        Args:
-            state: Current recruitment state
-            
-        Returns:
-            Dictionary with sourcing progress status
-        """
-        sourcing_metrics = state.get("sourcing_metrics", {})
-        sourced_candidates = state.get("candidate_pipeline", {}).get("sourced", [])
-        
-        status = {
-            "status": state.get("sourcing_status", "unknown"),
-            "total_sourced": len(sourced_candidates),
-            "quality_score": sourcing_metrics.get("average_fit_score", 0),
-            "completion_rate": 100 if state.get("sourcing_status") == "completed" else 75,
-            "issues": []
-        }
-        
-        # Check for issues
-        if len(sourced_candidates) < 2:
-            status["issues"].append("Low candidate volume")
-        if sourcing_metrics.get("average_fit_score", 0) < 70:
-            status["issues"].append("Low candidate quality scores")
-        
-        return status
-    
-    def _monitor_outreach_progress(self, state: RecruitmentExecutiveState) -> Dict[str, Any]:
-        """Monitor progress of outreach operations.
-        
-        Args:
-            state: Current recruitment state
-            
-        Returns:
-            Dictionary with outreach progress status
-        """
-        outreach_metrics = state.get("outreach_metrics", {})
-        campaigns = state.get("active_campaigns", [])
-        
-        contacted = len(state.get("candidate_pipeline", {}).get("contacted", []))
-        responded = len(state.get("candidate_pipeline", {}).get("responded", []))
-        
-        response_rate = (responded / contacted * 100) if contacted > 0 else 0
-        
-        status = {
-            "status": state.get("outreach_status", "unknown"),
-            "total_contacted": contacted,
-            "total_responded": responded,
-            "response_rate": response_rate,
-            "active_campaigns": len(campaigns),
-            "issues": []
-        }
-        
-        # Check for issues
-        if response_rate < 10:
-            status["issues"].append("Low response rate")
-        if contacted == 0:
-            status["issues"].append("No outreach initiated")
-        
-        return status
-    
-    def _calculate_progress_metrics(self, state: RecruitmentExecutiveState, sourcing_status: Dict[str, Any], outreach_status: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate overall progress metrics for the recruitment campaign.
-        
-        Args:
-            state: Current recruitment state
-            sourcing_status: Sourcing progress status
-            outreach_status: Outreach progress status
-            
-        Returns:
-            Dictionary with comprehensive progress metrics
-        """
-        pipeline = state.get("candidate_pipeline", {})
-        
-        metrics = {
-            "total_sourced": len(pipeline.get("sourced", [])),
-            "total_contacted": len(pipeline.get("contacted", [])),
-            "total_responded": len(pipeline.get("responded", [])),
-            "total_interviewed": len(pipeline.get("interviewed", [])),
-            "total_hired": len(pipeline.get("hired", [])),
-            "response_rate": outreach_status.get("response_rate", 0),
-            "conversion_funnel": {
-                "sourced_to_contacted": (len(pipeline.get("contacted", [])) / len(pipeline.get("sourced", [])) * 100) if pipeline.get("sourced") else 0,
-                "contacted_to_responded": outreach_status.get("response_rate", 0),
-                "responded_to_interviewed": (len(pipeline.get("interviewed", [])) / len(pipeline.get("responded", [])) * 100) if pipeline.get("responded") else 0
-            },
-            "pipeline_health": self._assess_pipeline_health(pipeline, sourcing_status, outreach_status),
-            "campaign_duration": self._calculate_campaign_duration(state),
-            "quality_metrics": {
-                "sourcing_quality": sourcing_status.get("quality_score", 0),
-                "engagement_quality": self._calculate_average_engagement(pipeline.get("responded", []))
-            }
-        }
-        
-        return metrics
-    
-    def _assess_pipeline_health(self, pipeline: Dict[str, List], sourcing_status: Dict[str, Any], outreach_status: Dict[str, Any]) -> str:
-        """Assess overall health of the recruitment pipeline.
-        
-        Args:
-            pipeline: Candidate pipeline data
-            sourcing_status: Sourcing status
-            outreach_status: Outreach status
-            
-        Returns:
-            Health status: 'excellent', 'good', 'fair', 'poor'
-        """
-        sourced = len(pipeline.get("sourced", []))
-        responded = len(pipeline.get("responded", []))
-        response_rate = outreach_status.get("response_rate", 0)
-        quality_score = sourcing_status.get("quality_score", 0)
-        
-        # Health scoring
-        health_score = 0
-        
-        # Volume scoring
-        if sourced >= 5:
-            health_score += 25
-        elif sourced >= 3:
-            health_score += 15
-        elif sourced >= 1:
-            health_score += 5
-        
-        # Response rate scoring
-        if response_rate >= 20:
-            health_score += 25
-        elif response_rate >= 10:
-            health_score += 15
-        elif response_rate >= 5:
-            health_score += 5
-        
-        # Quality scoring
-        if quality_score >= 80:
-            health_score += 25
-        elif quality_score >= 70:
-            health_score += 15
-        elif quality_score >= 60:
-            health_score += 5
-        
-        # Progress scoring
-        if responded > 0:
-            health_score += 25
-        
-        # Determine health status
-        if health_score >= 80:
-            return "excellent"
-        elif health_score >= 60:
-            return "good"
-        elif health_score >= 40:
-            return "fair"
-        else:
-            return "poor"
-    
-    def _calculate_campaign_duration(self, state: RecruitmentExecutiveState) -> str:
-        """Calculate duration of the recruitment campaign.
-        
-        Args:
-            state: Current recruitment state
-            
-        Returns:
-            Campaign duration as string
-        """
-        # This would be calculated from campaign start time
-        # For now, return a placeholder
-        return "2 days"
-    
-    def _calculate_average_engagement(self, responded_candidates: List[Dict[str, Any]]) -> float:
-        """Calculate average engagement score for responded candidates.
-        
-        Args:
-            responded_candidates: List of candidates who responded
-            
-        Returns:
-            Average engagement score
-        """
-        if not responded_candidates:
-            return 0.0
-        
-        total_engagement = sum(candidate.get("engagement_score", 50) for candidate in responded_candidates)
-        return total_engagement / len(responded_candidates)
-    
-    def _assess_intervention_need(self, progress_metrics: Dict[str, Any]) -> bool:
-        """Assess if human intervention is needed based on progress metrics.
-        
-        Args:
-            progress_metrics: Comprehensive progress metrics
-            
-        Returns:
-            Boolean indicating if intervention is needed
-        """
-        pipeline_health = progress_metrics.get("pipeline_health", "poor")
-        response_rate = progress_metrics.get("response_rate", 0)
-        total_sourced = progress_metrics.get("total_sourced", 0)
-        
-        # Intervention triggers
-        if pipeline_health == "poor":
-            return True
-        if response_rate < 5 and progress_metrics.get("total_contacted", 0) > 5:
-            return True
-        if total_sourced < 2:
-            return True
-        
-        return False
-    
-    def _should_continue_monitoring(self, progress_metrics: Dict[str, Any]) -> bool:
-        """Determine if monitoring should continue.
-        
-        Args:
-            progress_metrics: Current progress metrics
-            
-        Returns:
-            Boolean indicating if monitoring should continue
-        """
-        # Continue monitoring if campaign is active and healthy
-        pipeline_health = progress_metrics.get("pipeline_health", "poor")
-        total_responded = progress_metrics.get("total_responded", 0)
-        
-        # Stop monitoring if we have enough responses or campaign is complete
-        if total_responded >= 3:  # Sufficient responses
-            return False
-        if pipeline_health in ["excellent", "good"] and total_responded > 0:
-            return True
-        if pipeline_health == "poor":
-           return True
     
     def generate_report_node(self, state: RecruitmentExecutiveState) -> RecruitmentExecutiveState:
         """Generate comprehensive recruitment campaign report.
@@ -1965,67 +1260,18 @@ class RecruitmentExecutiveAgent:
         self.logger.info("📊 Generating comprehensive recruitment report...")
         
         try:
-            # Get current pipeline data
-            pipeline = state.get("candidate_pipeline", {})
-            sourcing_metrics = state.get("sourcing_metrics", {})
-            outreach_metrics = state.get("outreach_metrics", {})
-            monitoring_results = state.get("monitoring_results", {})
+            # REFACTORED: Use GenerateReportUseCase
+            use_case = GenerateReportUseCase()
+            import asyncio
+            report_results = asyncio.run(use_case.execute(state))
             
-            # Calculate summary statistics
-            summary_stats = {
-                "total_sourced": len(pipeline.get("sourced", [])),
-                "total_contacted": len(pipeline.get("contacted", [])),
-                "total_responded": len(pipeline.get("responded", [])),
-                "total_interviewed": len(pipeline.get("interviewed", [])),
-                "total_hired": len(pipeline.get("hired", []))
-            }
+            # Update state with report results
+            state["final_report"] = report_results.get("final_report", {})
+            state["report_generated"] = report_results.get("report_generated", False)
+            state["workflow_complete"] = report_results.get("workflow_complete", False)
             
-            # Calculate conversion rates
-            conversion_rates = {
-                "sourced_to_contacted": self._safe_percentage(summary_stats["total_contacted"], summary_stats["total_sourced"]),
-                "contacted_to_responded": self._safe_percentage(summary_stats["total_responded"], summary_stats["total_contacted"]),
-                "responded_to_interviewed": self._safe_percentage(summary_stats["total_interviewed"], summary_stats["total_responded"]),
-                "interviewed_to_hired": self._safe_percentage(summary_stats["total_hired"], summary_stats["total_interviewed"])
-            }
-            
-            # Generate detailed report
-            report = {
-                "report_id": f"recruitment_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                "generated_at": datetime.now().isoformat(),
-                "campaign_summary": {
-                    "position": state.get("parsed_requirements", {}).get("position", "N/A"),
-                    "duration": self._calculate_campaign_duration(state),
-                    "status": self._determine_campaign_status(state),
-                    "overall_health": monitoring_results.get("pipeline_health", "unknown")
-                },
-                "pipeline_metrics": summary_stats,
-                "conversion_funnel": conversion_rates,
-                "sourcing_performance": {
-                    "total_searched": sourcing_metrics.get("total_searched", 0),
-                    "average_fit_score": sourcing_metrics.get("average_fit_score", 0),
-                    "quality_score": sourcing_metrics.get("quality_score", 0),
-                    "sources_used": sourcing_metrics.get("sources_used", [])
-                },
-                "outreach_performance": {
-                    "response_rate": outreach_metrics.get("response_rate", 0),
-                    "channels_used": outreach_metrics.get("channels_used", []),
-                    "average_response_time": outreach_metrics.get("average_response_time", "N/A"),
-                    "engagement_quality": outreach_metrics.get("engagement_quality", 0)
-                },
-                "candidate_details": self._generate_candidate_details(pipeline),
-                "recommendations": self._generate_recommendations(state, summary_stats, conversion_rates),
-                "next_steps": self._generate_next_steps(state, summary_stats)
-            }
-            
-            # Update state with report
-            state["final_report"] = report
-            state["report_generated"] = True
-            state["workflow_complete"] = True
-            
-            self.logger.info(f"✅ Report generated successfully: {report['report_id']}")
-            
-            # Log summary to console
-            self._log_report_summary(report)
+            if report_results.get("status") == "error":
+                state["report_error"] = report_results.get("report_error", "Unknown error")
             
             return state
             
@@ -2034,172 +1280,7 @@ class RecruitmentExecutiveAgent:
             state["report_error"] = str(e)
             return state
     
-    def _safe_percentage(self, numerator: int, denominator: int) -> float:
-        """Safely calculate percentage, handling division by zero.
-        
-        Args:
-            numerator: Numerator value
-            denominator: Denominator value
-            
-        Returns:
-            Percentage as float, 0.0 if denominator is zero
-        """
-        return (numerator / denominator * 100) if denominator > 0 else 0.0
-    
-    def _determine_campaign_status(self, state: RecruitmentExecutiveState) -> str:
-        """Determine overall campaign status.
-        
-        Args:
-            state: Current recruitment state
-            
-        Returns:
-            Campaign status string
-        """
-        pipeline = state.get("candidate_pipeline", {})
-        
-        if pipeline.get("hired"):
-            return "successful"
-        elif pipeline.get("interviewed"):
-            return "in_progress_interviews"
-        elif pipeline.get("responded"):
-            return "in_progress_outreach"
-        elif pipeline.get("contacted"):
-            return "awaiting_responses"
-        elif pipeline.get("sourced"):
-            return "sourcing_complete"
-        else:
-            return "initializing"
-    
-    def _generate_candidate_details(self, pipeline: Dict[str, List]) -> Dict[str, Any]:
-        """Generate detailed candidate breakdown by pipeline stage.
-        
-        Args:
-            pipeline: Candidate pipeline data
-            
-        Returns:
-            Detailed candidate breakdown
-        """
-        details = {}
-        
-        for stage, candidates in pipeline.items():
-            if candidates:
-                details[stage] = {
-                    "count": len(candidates),
-                    "candidates": [
-                        {
-                            "name": candidate.get("name", "Unknown"),
-                            "position": candidate.get("position", "N/A"),
-                            "fit_score": candidate.get("fit_score", 0),
-                            "source": candidate.get("source", "Unknown"),
-                            "engagement_score": candidate.get("engagement_score", 0)
-                        } for candidate in candidates[:5]  # Limit to top 5 per stage
-                    ]
-                }
-        
-        return details
-    
-    def _generate_recommendations(self, state: RecruitmentExecutiveState, summary_stats: Dict[str, int], conversion_rates: Dict[str, float]) -> List[str]:
-        """Generate actionable recommendations based on campaign performance.
-        
-        Args:
-            state: Current recruitment state
-            summary_stats: Summary statistics
-            conversion_rates: Conversion rate metrics
-            
-        Returns:
-            List of recommendation strings
-        """
-        recommendations = []
-        
-        # Sourcing recommendations
-        if summary_stats["total_sourced"] < 5:
-            recommendations.append("Increase sourcing efforts - target at least 10-15 candidates for better selection")
-        
-        # Outreach recommendations
-        response_rate = conversion_rates["contacted_to_responded"]
-        if response_rate < 10:
-            recommendations.append("Improve outreach messaging - current response rate is below benchmark (10%)")
-        elif response_rate > 30:
-            recommendations.append("Excellent response rate! Consider scaling this outreach approach")
-        
-        # Conversion recommendations
-        if conversion_rates["sourced_to_contacted"] < 50:
-            recommendations.append("Review candidate qualification criteria - many sourced candidates are not being contacted")
-        
-        # Pipeline recommendations
-        pipeline_health = state.get("monitoring_results", {}).get("pipeline_health", "unknown")
-        if pipeline_health == "poor":
-            recommendations.append("Pipeline health is poor - consider revising sourcing strategy or requirements")
-        
-        # Quality recommendations
-        sourcing_metrics = state.get("sourcing_metrics", {})
-        if sourcing_metrics.get("average_fit_score", 0) < 70:
-            recommendations.append("Focus on higher quality candidates - average fit score is below target (70%)")
-        
-        if not recommendations:
-            recommendations.append("Campaign is performing well - continue current approach")
-        
-        return recommendations
-    
-    def _generate_next_steps(self, state: RecruitmentExecutiveState, summary_stats: Dict[str, int]) -> List[str]:
-        """Generate specific next steps based on current campaign state.
-        
-        Args:
-            state: Current recruitment state
-            summary_stats: Summary statistics
-            
-        Returns:
-            List of next step strings
-        """
-        next_steps = []
-        
-        if summary_stats["total_hired"] > 0:
-            next_steps.append("🎉 Recruitment successful! Begin onboarding process")
-            next_steps.append("Document successful sourcing and outreach strategies for future campaigns")
-        elif summary_stats["total_interviewed"] > 0:
-            next_steps.append("📋 Follow up on interview results and make hiring decisions")
-            next_steps.append("Prepare offer letters for successful candidates")
-        elif summary_stats["total_responded"] > 0:
-            next_steps.append("📞 Schedule interviews with responded candidates")
-            next_steps.append("Prepare interview questions and evaluation criteria")
-        elif summary_stats["total_contacted"] > 0:
-            next_steps.append("⏳ Wait for candidate responses (allow 5-7 business days)")
-            next_steps.append("Prepare follow-up messages for non-responders")
-        elif summary_stats["total_sourced"] > 0:
-            next_steps.append("📧 Initiate outreach campaign to sourced candidates")
-            next_steps.append("Prepare personalized outreach messages")
-        else:
-            next_steps.append("🔍 Begin candidate sourcing for the position")
-            next_steps.append("Define sourcing strategy and target channels")
-        
-        return next_steps
-    
-    def _log_report_summary(self, report: Dict[str, Any]) -> None:
-        """Log a summary of the report to the console.
-        
-        Args:
-            report: Generated report dictionary
-        """
-        summary = report["campaign_summary"]
-        metrics = report["pipeline_metrics"]
-        
-        self.logger.info("📊 RECRUITMENT CAMPAIGN SUMMARY")
-        self.logger.info("=" * 50)
-        self.logger.info(f"Position: {summary['position']}")
-        self.logger.info(f"Status: {summary['status']}")
-        self.logger.info(f"Duration: {summary['duration']}")
-        self.logger.info(f"Health: {summary['overall_health']}")
-        self.logger.info("")
-        self.logger.info("📈 PIPELINE METRICS")
-        self.logger.info(f"Sourced: {metrics['total_sourced']}")
-        self.logger.info(f"Contacted: {metrics['total_contacted']}")
-        self.logger.info(f"Responded: {metrics['total_responded']}")
-        self.logger.info(f"Interviewed: {metrics['total_interviewed']}")
-        self.logger.info(f"Hired: {metrics['total_hired']}")
-        self.logger.info("=" * 50)
-    
     # ---- Conditional Logic ----
-    
     def route_next_step(self, state: RecruitmentExecutiveState) -> str:
         """Determine the next step in the workflow."""
         next_action = state.get("next_action", "sourcing")

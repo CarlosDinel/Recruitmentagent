@@ -19,6 +19,39 @@ from tools.scourcing_tools import match_candidates_to_job
 # Set up logging
 logger = logging.getLogger(__name__)
 
+class CandidateEvaluationPrompts:
+    @staticmethod
+    def narrative_generation_system_prompt() -> str:
+        return (
+            "You are an experienced recruiter. Write 3-4 paragraph hiring narratives that are honest, evidence-based, and decision-ready."
+        )
+
+    @staticmethod
+    def narrative_generation_prompt(
+        candidate_name: str,
+        title: str,
+        company: str,
+        overall_score: int,
+        matched_skills: List[str],
+        missing_skills: List[str],
+        experience_match: int,
+        job_description: str,
+        recommendation: str,
+        evaluation_details: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        job_desc_excerpt = job_description[:400] + "..." if len(job_description) > 400 else job_description
+        matched = ", ".join(matched_skills) if matched_skills else "None"
+        missing = ", ".join(missing_skills) if missing_skills else "None"
+        return (
+            f"Candidate: {candidate_name}\n"
+            f"Role: {title} at {company}\n"
+            f"Overall Match: {overall_score}% | Experience: {experience_match}%\n"
+            f"Recommendation: {recommendation}\n\n"
+            f"Matched Skills: {matched}\nMissing Skills: {missing}\n\n"
+            f"Job Excerpt: {job_desc_excerpt}\n\n"
+            "Write a 3-4 paragraph brief covering: overall fit + confidence, key strengths with evidence, gaps and risk, hidden factors and clear next step."
+        )
+
 class CandidateEvaluationAgent:
     """
     Candidate Evaluation Agent - Makes intelligent suitability decisions.
@@ -44,12 +77,13 @@ class CandidateEvaluationAgent:
             "cultural_fit": 0.10
         }
         
-        # Quality thresholds
+        # Quality thresholds - ADJUSTED for realistic matching
+        # Note: Raw LinkedIn search data has limited info, so thresholds are lower than enriched data
         self.suitability_thresholds = {
-            "high_priority": 80,      # Definitely suitable
-            "medium_priority": 70,    # Suitable with minor concerns
-            "low_priority": 50,       # Potentially suitable, needs review
-            "not_suitable": 0         # Below 50 = not suitable
+            "high_priority": 65,      # Definitely suitable (was 80)
+            "medium_priority": 55,    # Suitable with minor concerns (was 70)
+            "low_priority": 40,       # Potentially suitable, needs review (was 50)
+            "not_suitable": 0         # Below 40 = not suitable
         }
     
     def evaluate_candidates(
@@ -179,6 +213,15 @@ class CandidateEvaluationAgent:
             recommendation=recommendation
         )
         
+        # Generate narrative for hiring manager
+        job_requirements = project_metadata.get("description", "")
+        hiring_narrative = self.generate_candidate_narrative(
+            candidate=candidate,
+            match_analysis=match_analysis,
+            job_requirements=job_requirements,
+            recommendation=recommendation
+        )
+        
         # Create evaluation metadata
         evaluation_id = f"EVAL_{project_metadata.get('projectid', 'UNK')}_{candidate.get('provider_id', 'UNK')}_{int(datetime.now().timestamp())}"
         
@@ -197,6 +240,7 @@ class CandidateEvaluationAgent:
                     "education_match": education_score
                 },
                 "detailed_reasoning": detailed_reasoning,
+                "hiring_narrative": hiring_narrative,
                 "decision_factors": decision_factors,
                 "risk_factors": risk_factors,
                 "evaluation_metadata": {
@@ -444,6 +488,27 @@ class CandidateEvaluationAgent:
         suitable = categorized_results["suitable"]
         potentially_suitable = categorized_results["potentially_suitable"]
         not_suitable = categorized_results["not_suitable"]
+
+        def _flatten(category_results: List[Dict[str, Any]], status: str) -> List[Dict[str, Any]]:
+            """Attach suitability metadata back to candidate dicts for downstream use."""
+            flattened = []
+            for result in category_results:
+                candidate = result.get("candidate", {}).copy()
+                assessment = result.get("suitability_assessment", {})
+                candidate["suitability_status"] = status.lower()
+                candidate["suitability_score"] = assessment.get("overall_score", 0)
+                candidate["suitability_reasoning"] = assessment.get("detailed_reasoning", {}).get("overall_assessment", {}).get("recommendation_rationale", "")
+                candidate["evaluation_id"] = assessment.get("evaluation_id")
+                candidate["priority"] = assessment.get("priority")
+                candidate["next_action"] = assessment.get("next_action")
+                flattened.append(candidate)
+            return flattened
+
+        evaluated_candidates = (
+            _flatten(suitable, "suitable")
+            + _flatten(potentially_suitable, "maybe")
+            + _flatten(not_suitable, "not_suitable")
+        )
         
         return {
             "success": True,
@@ -458,6 +523,7 @@ class CandidateEvaluationAgent:
                 "evaluation_timestamp": datetime.now().isoformat(),
                 "evaluator": self.name
             },
+            "evaluated_candidates": evaluated_candidates,
             "suitable_candidates": [
                 self._create_candidate_summary(result, "SUITABLE")
                 for result in suitable
@@ -543,6 +609,125 @@ class CandidateEvaluationAgent:
             "not_suitable_summary": {"count": 0, "candidates": []},
             "recommended_for_scraping": []
         }
+    
+    def generate_candidate_narrative(
+        self,
+        candidate: Dict[str, Any],
+        match_analysis: Dict[str, Any],
+        job_requirements: str,
+        recommendation: str
+    ) -> str:
+        """
+        Generate detailed hiring narrative for a candidate using GPT-5.
+        
+        Uses an embedded prompt class for consistent, dynamic narratives.
+        """
+        
+        try:
+            from langchain_openai import ChatOpenAI
+            from langchain_core.messages import SystemMessage, HumanMessage
+            import os
+            
+            # Initialize GPT-4 for detailed narrative
+            llm = ChatOpenAI(
+                model=os.getenv("OPENAI_MODEL", "gpt-5"),
+                temperature=0.5,
+                api_key=os.getenv("OPENAI_API_KEY")
+            )
+            
+            # Extract evaluation data
+            overall_score = match_analysis.get("overall_score", 0)
+            skills_match = match_analysis.get("skills_match", {})
+            experience_match = match_analysis.get("experience_match", {})
+            matched_skills = skills_match.get("matched_skills", [])
+            missing_skills = skills_match.get("missing_skills", [])
+            
+            # Get optimized system prompt
+            system_prompt = CandidateEvaluationPrompts.narrative_generation_system_prompt()
+            
+            # Generate user prompt with candidate details
+            user_prompt = CandidateEvaluationPrompts.narrative_generation_prompt(
+                candidate_name=candidate.get('name', 'Unknown'),
+                title=candidate.get('title', 'Not specified'),
+                company=candidate.get('company', 'Not specified'),
+                overall_score=overall_score,
+                matched_skills=matched_skills,
+                missing_skills=missing_skills,
+                experience_match=experience_match.get('score', 0),
+                job_description=job_requirements,
+                recommendation=recommendation,
+                evaluation_details=None
+            )
+            
+            # Generate narrative with optimized prompts
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt)
+            ]
+            
+            response = llm.invoke(messages)
+            narrative = response.content
+            
+            logger.info(f"✅ Generated evaluation narrative for {candidate.get('name')} ({len(narrative)} chars)")
+            return narrative
+            
+        except Exception as e:
+            logger.warning(f"⚠️ GPT-5 narrative generation failed: {e}. Using structured fallback.")
+            return self._generate_structured_narrative(candidate, match_analysis, recommendation)
+    
+    def _generate_structured_narrative(
+        self,
+        candidate: Dict[str, Any],
+        match_analysis: Dict[str, Any],
+        recommendation: str
+    ) -> str:
+        """Generate structured narrative when GPT-5 is unavailable."""
+        
+        overall_score = match_analysis.get("overall_score", 0)
+        skills_match = match_analysis.get("skills_match", {})
+        experience_match = match_analysis.get("experience_match", {})
+        matched_skills = skills_match.get("matched_skills", [])
+        missing_skills = skills_match.get("missing_skills", [])
+        
+        # Build narrative
+        narrative = f"**Candidate: {candidate.get('name', 'Unknown')}**\n\n"
+        
+        # Overall assessment
+        if recommendation == "suitable":
+            narrative += f"This is a strong candidate with {overall_score}% overall match. "
+            narrative += "They have the core skills and experience needed and should advance to interview.\n\n"
+        elif recommendation == "maybe":
+            narrative += f"This candidate shows potential with {overall_score}% match. "
+            narrative += "While not perfect, they have foundational skills and could work with some ramp-up.\n\n"
+        else:
+            narrative += f"This candidate doesn't fully meet requirements ({overall_score}% match). "
+            narrative += "There are significant gaps that would slow productivity.\n\n"
+        
+        # Strengths
+        if matched_skills:
+            narrative += f"**Strengths:**\n"
+            narrative += f"- Has demonstrated skills: {', '.join(matched_skills[:3])}\n"
+            if skills_match.get('score', 0) >= 70:
+                narrative += f"- Strong technical alignment ({skills_match.get('score', 0)}% skills match)\n"
+            if experience_match.get('score', 0) >= 70:
+                narrative += f"- Relevant experience background\n"
+            narrative += "\n"
+        
+        # Gaps
+        if missing_skills:
+            narrative += f"**Gaps to Address:**\n"
+            narrative += f"- Missing: {', '.join(missing_skills[:2])}\n"
+            narrative += "- Would require training or learning time\n\n"
+        
+        # Recommendation
+        if recommendation == "suitable":
+            narrative += "**Next Step:** Schedule phone screen → technical interview\n"
+        elif recommendation == "maybe":
+            narrative += "**Next Step:** Quick phone screen to assess learning potential\n"
+        else:
+            narrative += "**Next Step:** Archive for future opportunities\n"
+        
+        return narrative
 
 # Factory function for easy instantiation
 def create_candidate_evaluation_agent() -> CandidateEvaluationAgent:

@@ -66,17 +66,32 @@ from enum import Enum
 import json
 import logging
 import time
+import re
 import uuid
+import asyncio
 
 # AI decision making (mock implementation - replace with your preferred LLM)
 # from langchain_core.messages import SystemMessage, HumanMessage
 # from langchain_openai import ChatOpenAI
 
 # Custom imports for the working system
-from sub_agents.candidate_serching_agent import CandidateSearchingAgent
-from sub_agents.candidate_evaluation_agent import CandidateEvaluationAgent
-from agents.database_agent import DatabaseAgent, DatabaseAgentState
 from config import get_config, AppConfig
+
+# Clean architecture orchestrator and dependencies
+from src.application.orchestrators.sourcing_manager_orchestrator import (
+    SourcingManagerOrchestrator,
+)
+from src.application.use_cases.sourcing.search_candidates import SearchCandidatesUseCase
+from src.domain.services.candidate_evaluation_service import CandidateEvaluationService
+from src.infrastructure.persistence.mongodb.mongodb_candidate_repository import (
+    MongoDBCandidateRepository,
+)
+from src.infrastructure.persistence.mongodb.mongodb_project_repository import (
+    MongoDBProjectRepository,
+)
+from src.infrastructure.external_services.linkedin.linkedin_service_impl import (
+    LinkedInServiceImpl,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -146,7 +161,9 @@ class CandidateRecord:
     experience_years: int = 0
     skills: List[str] = field(default_factory=list)
     education: List[Dict[str, Any]] = field(default_factory=list)
+    work_experience: List[Dict[str, Any]] = field(default_factory=list)
     contact_info: Dict[str, str] = field(default_factory=dict)
+    profile_summary: str = ""
     
     # Search metadata
     search_score: float = 0.0
@@ -163,6 +180,8 @@ class CandidateRecord:
     profile_enriched: bool = False
     enrichment_timestamp: Optional[datetime] = None
     enrichment_details: Dict[str, Any] = field(default_factory=dict)
+    relevant_skills: List[str] = field(default_factory=list)
+    relevant_experience: List[Dict[str, Any]] = field(default_factory=list)
     
     def dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -176,7 +195,9 @@ class CandidateRecord:
             "experience_years": self.experience_years,
             "skills": self.skills,
             "education": self.education,
+            "work_experience": self.work_experience,
             "contact_info": self.contact_info,
+            "profile_summary": self.profile_summary,
             "search_score": self.search_score,
             "search_source": self.search_source,
             "search_timestamp": self.search_timestamp.isoformat() if self.search_timestamp else None,
@@ -186,7 +207,9 @@ class CandidateRecord:
             "evaluation_timestamp": self.evaluation_timestamp.isoformat() if self.evaluation_timestamp else None,
             "profile_enriched": self.profile_enriched,
             "enrichment_timestamp": self.enrichment_timestamp.isoformat() if self.enrichment_timestamp else None,
-            "enrichment_details": self.enrichment_details
+            "enrichment_details": self.enrichment_details,
+            "relevant_skills": self.relevant_skills,
+            "relevant_experience": self.relevant_experience
         }
 
 
@@ -372,41 +395,90 @@ class UnifiedSourcingManager:
         # Use config values or fallbacks
         self.model_name = model_name or self.config.openai.model
         self.temperature = temperature or self.config.openai.temperature
-        
-        # Initialize working sub-agents
-        self.search_agent = CandidateSearchingAgent()
-        self.evaluation_agent = CandidateEvaluationAgent()
-        
-        # Initialize AI decision making (mock - replace with your LLM)
-        self.llm = None  # MockLLM placeholder
-        
-        # Initialize database agent for candidate storage
-        db_state = DatabaseAgentState(
-            name="UnifiedSourcingManager_DatabaseAgent",
-            description="Database operations for candidate storage",
-            tools=[], tool_descriptions=[], tool_input_types=[], tool_output_types=[],
-            input_type="dict", output_type="dict", intermediate_steps=[],
-            max_iterations=5, iteration_count=0, stop=False,
-            last_action="", last_observation="", last_input="", last_output="",
-            graph=None, memory=[], memory_limit=100, verbose=False,
-            temperature=0.7, top_k=50, top_p=0.9, frequency_penalty=0.0, presence_penalty=0.0,
-            best_of=1, n=1, logit_bias={}, seed=42, model="gpt-4", api_key=""
-        )
-        self.database_agent = DatabaseAgent(db_state)
-        
-        # Profile scraping agent (mock for now)
-        self.scraping_agent = None
-        
+
         # Configuration from .env
         self.max_retries = self.config.unified_sourcing.max_retries
         self.timeout_minutes = self.config.unified_sourcing.timeout_minutes
         self.min_candidates_threshold = self.config.unified_sourcing.min_candidates
         self.min_suitable_threshold = self.config.unified_sourcing.min_suitable
+
+        # Clean-architecture dependencies
+        self.candidate_repository = MongoDBCandidateRepository()
+        self.project_repository = MongoDBProjectRepository()
+        self.linkedin_service = LinkedInServiceImpl()
+        self.search_use_case = SearchCandidatesUseCase(
+            candidate_repository=self.candidate_repository,
+            linkedin_service=self.linkedin_service,
+            ai_service=None,
+        )
+        self.candidate_evaluation_service = CandidateEvaluationService()
+
+        orchestrator_config = {
+            "max_retries": self.max_retries,
+            "min_candidates": self.min_candidates_threshold,
+            "min_suitable": self.min_suitable_threshold,
+        }
+
+        # Clean-architecture orchestrator for sourcing pipeline
+        self.orchestrator = SourcingManagerOrchestrator(
+            candidate_repository=self.candidate_repository,
+            project_repository=self.project_repository,
+            linkedin_service=self.linkedin_service,
+            search_candidates_use_case=self.search_use_case,
+            candidate_evaluation_service=self.candidate_evaluation_service,
+            config=orchestrator_config,
+        )
         
         logger.info(f"UnifiedSourcingManager initialized with configuration from .env")
         logger.info(f"Config: max_retries={self.max_retries}, timeout={self.timeout_minutes}min, AI={self.config.unified_sourcing.ai_decision_enabled}")
     
-    # ---- Main Orchestration Method ----
+    # ---- Main Orchestration Methods ----
+    
+    async def run(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Async wrapper for process_sourcing_request - used by CLI and API.
+        
+        This method provides an async interface compatible with the CLI's async/await
+        pattern while internally calling the synchronous process_sourcing_request.
+        
+        Args:
+            request: Dictionary with:
+                - job_requirements: Job description text
+                - target_count: Number of candidates to find (default: 10)
+                - quality_threshold: Minimum suitability score (default: 0.7)
+                - project_id: Project identifier (optional)
+                - enable_evaluation: Enable candidate evaluation (default: True)
+                - scrape_profiles: Enable profile enrichment (default: True)
+        
+        Returns:
+            Complete sourcing results with qualified candidates
+        
+        Example:
+            >>> manager = UnifiedSourcingManager()
+            >>> result = await manager.run({
+            ...     'job_requirements': 'Find senior Python developers in Amsterdam',
+            ...     'target_count': 10,
+            ...     'enable_evaluation': True
+            ... })
+        """
+        # Extract parameters from request
+        job_requirements = request.get('job_requirements', '')
+        target_count = request.get('target_count', 10)
+        project_id = request.get('project_id', f"CLI_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        
+        # Build project requirements dict
+        project_requirements = {
+            'position': 'Candidate',  # Will be parsed from job_requirements
+            'description': job_requirements
+        }
+        
+        # Call synchronous method
+        return self.process_sourcing_request(
+            project_requirements=project_requirements,
+            job_description=job_requirements,
+            project_id=project_id,
+            target_count=target_count
+        )
     
     def process_sourcing_request(self, 
                                      project_requirements: Dict[str, Any],
@@ -414,7 +486,7 @@ class UnifiedSourcingManager:
                                      project_id: str,
                                      target_count: int = 50) -> Dict[str, Any]:
         """
-        Main orchestration method - coordinates complete sourcing pipeline with AI intelligence.
+        Main orchestration method - delegates to clean-architecture orchestrator.
         
         Args:
             project_requirements: Job requirements and search criteria
@@ -427,400 +499,170 @@ class UnifiedSourcingManager:
         """
         request_id = str(uuid.uuid4())
         logger.info(f"🚀 Starting unified sourcing request {request_id}")
-        
-        workflow_state = {
-            "request_id": request_id,
-            "project_id": project_id,
-            "project_requirements": project_requirements,
-            "job_description": job_description,
-            "target_count": target_count,
-            "started_at": datetime.now(),
-            "current_stage": WorkflowStage.INITIALIZING.value,
-            "stages_completed": [],
-            "candidates_pipeline": {
-                "found": [],
-                "evaluated": [],
-                "enriched": [],
-                "final": []
-            },
-            "candidates_records": {  # Enhanced with CandidateRecord objects
-                "found": [],
-                "evaluated": [],
-                "enriched": [],
-                "final": []
-            },
-            "metrics": {
-                "total_found": 0,
-                "total_suitable": 0,
-                "total_enriched": 0,
-                "success_rate": 0.0
-            },
-            "decisions": [],  # Track AI decisions
-            "errors": [],
-            "warnings": [],
-            "retry_count": 0
-        }
-        
+
         try:
-            # Phase 1: Intelligent Candidate Search
-            self._execute_enhanced_search_phase(workflow_state)
-            
-            # AI Decision: Proceed to evaluation?
-            if not self._should_proceed_to_evaluation(workflow_state):
-                return self._generate_early_completion_results(workflow_state, "insufficient_candidates")
-            
-            # Phase 2: Candidate Evaluation with Database Storage
-            self._execute_enhanced_evaluation_phase(workflow_state)
-            
-            # AI Decision: Proceed to enrichment?
-            if not self._should_proceed_to_enrichment(workflow_state):
-                return self._generate_results_without_enrichment(workflow_state)
-            
-            # Phase 3: Intelligent Profile Enrichment
-            self._execute_enhanced_enrichment_phase(workflow_state)
-            
-            # Phase 4: Final Results Generation
-            final_results = self._generate_enhanced_final_results(workflow_state)
-            
+            result = asyncio.run(
+                self.orchestrator.process_sourcing_request(
+                    project_id=project_id,
+                    requirements=project_requirements,
+                    job_description=job_description,
+                    target_count=target_count,
+                )
+            )
+
             logger.info(f"✅ Unified sourcing request {request_id} completed successfully")
-            return final_results
-            
+            return result
+
         except Exception as e:
             logger.error(f"❌ Unified sourcing request {request_id} failed: {str(e)}")
-            return self._generate_error_results(workflow_state, str(e))
-    
-    # ---- Enhanced Phase Execution Methods ----
-    
-    def _execute_enhanced_search_phase(self, workflow_state: Dict[str, Any]):
-        """Execute candidate search phase with retry logic and AI decision making"""
-        logger.info("📋 Phase 1: Enhanced Candidate Search")
-        workflow_state["current_stage"] = WorkflowStage.SEARCHING.value
-        
-        max_search_attempts = 3
-        attempt = 0
-        
-        while attempt < max_search_attempts:
-            try:
-                # Delegate to CandidateSearchingAgent with proper request format
-                search_request = {
-                    "projectid": workflow_state["project_id"],
-                    "searchid": f"search_{workflow_state['request_id'][:8]}",
-                    "naam_project": f"UnifiedSourcing_{workflow_state['project_id']}",
-                    "campaign_num": "001",
-                    "job_requirements": workflow_state["job_description"],
-                    "max_results": workflow_state["target_count"],
-                    "search_criteria": workflow_state["project_requirements"]
-                }
-                
-                search_results = self.search_agent.process_request(search_request)
-                
-                # Enhanced parsing with CandidateRecord objects  
-                # CandidateSearchingAgent returns candidates in "enriched_candidates" key
-                candidates_found = search_results.get("enriched_candidates", [])
-                candidate_records = self._parse_search_results({"candidates": candidates_found})
-                
-                workflow_state["candidates_pipeline"]["found"] = candidates_found
-                workflow_state["candidates_records"]["found"] = candidate_records
-                workflow_state["metrics"]["total_found"] = len(candidates_found)
-                workflow_state["stages_completed"].append("search")
-                
-                logger.info(f"✅ Found {len(candidates_found)} candidates")
-                break
-                
-            except Exception as e:
-                attempt += 1
-                logger.warning(f"⚠️ Search attempt {attempt} failed: {str(e)}")
-                
-                if attempt < max_search_attempts:
-                    # AI decision on how to handle search failure
-                    decision = self._make_workflow_decision("search_failed", workflow_state)
-                    workflow_state["decisions"].append(decision.dict() if hasattr(decision, 'dict') else str(decision))
-                    
-                    if decision.action == "retry":
-                        import time
-                        time.sleep(2)  # Brief delay before retry
-                        continue
-                    elif decision.action == "adjust":
-                        self._adjust_search_criteria(workflow_state)
-                        continue
-                    else:
-                        raise
-                else:
-                    workflow_state["errors"].append({
-                        "phase": "search",
-                        "error": str(e),
-                        "timestamp": datetime.now().isoformat(),
-                        "attempts": attempt
-                    })
-                    raise
-    
-    def _execute_enhanced_evaluation_phase(self, workflow_state: Dict[str, Any]):
-        """Execute candidate evaluation phase with enhanced data handling"""
-        logger.info("🔍 Phase 2: Enhanced Candidate Evaluation")
-        workflow_state["current_stage"] = WorkflowStage.EVALUATING.value
-        
-        try:
-            candidates = workflow_state["candidates_pipeline"]["found"]
-            
-            # Delegate to CandidateEvaluationAgent with proper request format
-            evaluation_request = {
-                "candidates": candidates,
-                "job_requirements": workflow_state["job_description"],
-                "projectid": workflow_state["project_id"],
-                "naam_project": f"UnifiedSourcing_{workflow_state['project_id']}",
-                "campaign_num": "001",
-                "evaluation_criteria": workflow_state["project_requirements"]
-            }
-            
-            evaluation_results = self.evaluation_agent.evaluate_candidates(evaluation_request)
-            
-            # Enhanced parsing with CandidateRecord objects
-            evaluated_candidates = evaluation_results.get("evaluated_candidates", [])
-            candidate_records = self._parse_evaluation_results(evaluation_results, workflow_state["candidates_records"]["found"])
-            
-            workflow_state["candidates_pipeline"]["evaluated"] = evaluated_candidates
-            workflow_state["candidates_records"]["evaluated"] = candidate_records
-            
-            # Save candidates to database via DatabaseAgent with LinkedIn URL unique key
-            self._save_candidates_to_database(evaluated_candidates, workflow_state["project_id"])
-            
-            # Calculate suitable candidates
-            suitable_candidates = [
-                c for c in evaluated_candidates 
-                if c.get("suitability_status") in ["suitable", "maybe"]
-            ]
-            workflow_state["metrics"]["total_suitable"] = len(suitable_candidates)
-            workflow_state["metrics"]["success_rate"] = (
-                len(suitable_candidates) / len(candidates) if candidates else 0.0
-            )
-            workflow_state["stages_completed"].append("evaluation")
-            
-            logger.info(f"✅ Evaluated {len(evaluated_candidates)} candidates, {len(suitable_candidates)} suitable/maybe")
-            
-        except Exception as e:
-            logger.error(f"❌ Evaluation phase failed: {str(e)}")
-            workflow_state["errors"].append({
-                "phase": "evaluation",
+            # Return structured error similar to orchestrator
+            return {
+                "success": False,
                 "error": str(e),
-                "timestamp": datetime.now().isoformat()
-            })
-            raise
-    
-    def _execute_enhanced_enrichment_phase(self, workflow_state: Dict[str, Any]):
-        """Execute profile enrichment phase with intelligent candidate selection"""
-        logger.info("💼 Phase 3: Enhanced Profile Enrichment")
-        workflow_state["current_stage"] = WorkflowStage.ENRICHING.value
-        
-        try:
-            # Get suitable candidates for enrichment (cost optimization)
-            candidate_records = workflow_state["candidates_records"]["evaluated"]
-            suitable_records = [
-                c for c in candidate_records 
-                if c.suitability_status in ["suitable", "maybe"]
-            ]
-            
-            if not suitable_records:
-                logger.info("No suitable candidates found for enrichment")
-                workflow_state["candidates_pipeline"]["enriched"] = []
-                workflow_state["candidates_records"]["enriched"] = []
-                return
-            
-            # Mock enrichment process (enhance when ProfileScrapingAgent is available)
-            enriched_records = []
-            for candidate_record in suitable_records:
-                enriched_record = self._enrich_candidate_record(candidate_record)
-                enriched_records.append(enriched_record)
-            
-            # Convert back to dict format for pipeline
-            enriched_candidates = [record.dict() for record in enriched_records]
-            
-            workflow_state["candidates_pipeline"]["enriched"] = enriched_candidates
-            workflow_state["candidates_records"]["enriched"] = enriched_records
-            workflow_state["metrics"]["total_enriched"] = len(enriched_candidates)
-            workflow_state["stages_completed"].append("enrichment")
-            
-            # Update enriched candidates in database
-            self._update_enriched_candidates_in_database(enriched_candidates, workflow_state["project_id"])
-            
-            logger.info(f"✅ Enriched {len(enriched_candidates)} candidate profiles")
-            
-        except Exception as e:
-            logger.error(f"⚠️ Enrichment phase warning: {str(e)}")
-            workflow_state["warnings"].append(f"Enrichment failed: {str(e)}")
-            # Continue with non-enriched suitable candidates
-            suitable_candidates = [
-                c.dict() for c in workflow_state["candidates_records"]["evaluated"]
-                if c.suitability_status in ["suitable", "maybe"]
-            ]
-            workflow_state["candidates_pipeline"]["enriched"] = suitable_candidates
-            workflow_state["candidates_records"]["enriched"] = [
-                c for c in workflow_state["candidates_records"]["evaluated"]
-                if c.suitability_status in ["suitable", "maybe"]
-            ]
-    
-    # ---- Enhanced Decision Making Methods (AI-Powered) ----
-    
-    def _should_proceed_to_evaluation(self, workflow_state: Dict[str, Any]) -> bool:
-        """AI-enhanced decision logic for proceeding to evaluation phase"""
-        candidates_found = workflow_state["metrics"]["total_found"]
-        min_threshold = self.min_candidates_threshold  # From .env configuration
-        
-        if candidates_found < min_threshold:
-            logger.warning(f"Only {candidates_found} candidates found, minimum is {min_threshold}")
-            
-            # AI decision on whether to proceed with limited candidates (if enabled)
-            if self.config.unified_sourcing.ai_decision_enabled:
-                decision = self._make_workflow_decision("low_candidate_count", workflow_state)
-                workflow_state["decisions"].append(decision.dict() if hasattr(decision, 'dict') else str(decision))
-                
-                if decision.action == "continue":
-                    workflow_state["warnings"].append(f"Proceeding with limited candidates: {candidates_found}")
-                    return True
-                elif decision.action == "retry":
-                    if workflow_state["retry_count"] < self.max_retries:
-                        workflow_state["retry_count"] += 1
-                        self._retry_search_with_adjustments(workflow_state)
-                        return workflow_state["metrics"]["total_found"] >= min_threshold
-            else:
-                # Simple logic when AI decisions are disabled
-                if candidates_found > 0:
-                    workflow_state["warnings"].append(f"Proceeding with {candidates_found} candidates (AI decisions disabled)")
-                    return True
-            
-            return False
-        
-        return True
-    
-    def _should_proceed_to_enrichment(self, workflow_state: Dict[str, Any]) -> bool:
-        """AI-enhanced decision logic for proceeding to enrichment phase"""
-        suitable_count = workflow_state["metrics"]["total_suitable"]
-        min_threshold = self.min_suitable_threshold  # From .env configuration
-        
-        if suitable_count < min_threshold:
-            # AI decision on enrichment with limited suitable candidates (if enabled)
-            if self.config.unified_sourcing.ai_decision_enabled:
-                decision = self._make_workflow_decision("low_suitable_count", workflow_state)
-                workflow_state["decisions"].append(decision.dict() if hasattr(decision, 'dict') else str(decision))
-                
-                if decision.action == "continue":
-                    logger.info(f"Proceeding with enrichment of {suitable_count} suitable candidates")
-                    workflow_state["warnings"].append(f"Low suitable candidate count: {suitable_count}")
-                    return suitable_count > 0
-                elif decision.action == "adjust":
-                    # Lower evaluation criteria and re-evaluate
-                    self._adjust_evaluation_criteria(workflow_state)
-                    return workflow_state["metrics"]["total_suitable"] > 0
-            else:
-                # Simple logic when AI decisions are disabled
-                if suitable_count > 0:
-                    workflow_state["warnings"].append(f"Proceeding with {suitable_count} suitable candidates (AI decisions disabled)")
-                    return True
-        
-        return suitable_count > 0
-    
-    def _make_workflow_decision(self, situation: str, workflow_state: Dict[str, Any]) -> SourcingManagerDecision:
-        """Make intelligent workflow decisions using AI/LLM"""
-        
-        try:
-            # Prepare decision context
-            context = {
-                "situation": situation,
-                "current_stage": workflow_state["current_stage"],
-                "candidates_found": workflow_state["metrics"]["total_found"],
-                "candidates_suitable": workflow_state["metrics"]["total_suitable"],
-                "success_rate": workflow_state["metrics"]["success_rate"],
-                "retry_count": workflow_state["retry_count"],
-                "max_retries": self.max_retries,
-                "target_count": workflow_state["target_count"],
-                "errors": len(workflow_state["errors"]),
-                "warnings": len(workflow_state["warnings"])
+                "request_id": request_id,
             }
+    
+    # ---- Decision Making Methods ----
+    def _make_workflow_decision(self, situation: str, workflow_state: Dict[str, Any]) -> SourcingManagerDecision:
+        """
+        Make intelligent workflow decisions using real GPT-5 reasoning.
+        
+        Now uses optimized prompts from unified_sourcing_manager_prompts.py
+        for better decision quality with concrete examples and reasoning framework.
+        """
+        
+        try:
+            from langchain_openai import ChatOpenAI
+            import os
+            from langchain_core.messages import SystemMessage, HumanMessage
             
-            # Create decision prompt
-            decision_prompt = f"""
-            As a Sourcing Manager AI, analyze this workflow situation and make a decision:
+            # Initialize GPT-5 for real decision making
+            llm = ChatOpenAI(
+                model=os.getenv("OPENAI_MODEL", "gpt-5"),
+                temperature=0.3,  # Low temperature for consistent decisions
+                api_key=self.config.openai_api_key
+            )
             
-            SITUATION: {situation}
-            CONTEXT: {json.dumps(context, indent=2)}
+            # Prepare decision context
+            candidates_found = workflow_state["metrics"]["total_found"]
+            candidates_suitable = workflow_state["metrics"]["total_suitable"]
+            success_rate = workflow_state["metrics"]["success_rate"]
+            retry_count = workflow_state["retry_count"]
+            target_count = workflow_state.get("target_count", 50)
+            error_count = len(workflow_state["errors"])
+            warning_count = len(workflow_state["warnings"])
+            current_stage = workflow_state["current_stage"]
             
-            Based on this context, decide what action to take:
-            - CONTINUE: Proceed with current workflow despite limitations
-            - RETRY: Retry the current phase with same parameters
-            - ADJUST: Modify criteria/parameters and retry
-            - ESCALATE: Situation requires human intervention
-            - COMPLETE: Finish workflow with current results
+            # Get enhanced prompt with examples and reasoning framework
+            decision_prompt = self._get_workflow_decision_prompt(
+                situation=situation,
+                current_stage=current_stage,
+                candidates_found=candidates_found,
+                candidates_suitable=candidates_suitable,
+                success_rate=success_rate,
+                retry_count=retry_count,
+                max_retries=self.max_retries,
+                target_count=target_count,
+                error_count=error_count,
+                warning_count=warning_count
+            )
+
+            # Call GPT-5 for real decision with enhanced prompt
+            logger.info(f"🤖 Asking GPT-5 for workflow decision on: {situation}")
             
-            Respond with JSON format:
-            {{
-                "action": "continue|retry|adjust|escalate|complete",
-                "reasoning": "Detailed explanation of the decision",
-                "confidence": 0.8,
-                "next_steps": ["specific", "actionable", "steps"],
-                "adjustments": {{"parameter": "new_value"}}
-            }}
-            """
+            # Use only the decision_prompt (it already includes system-level guidance)
+            messages = [
+                HumanMessage(content=decision_prompt)
+            ]
             
-            # Mock AI decision (replace with your LLM implementation)
-            # messages = [
-            #     SystemMessage(content="You are an expert AI Sourcing Manager making workflow decisions."),
-            #     HumanMessage(content=decision_prompt)
-            # ]
-            # response = await self.llm.ainvoke(messages)
+            response = llm.invoke(messages)
+            response_text = response.content
             
-            # Mock decision logic for now
-            if situation == "low_candidate_count" and context["retry_count"] < self.max_retries:
-                mock_response_content = '{"action": "retry", "reasoning": "Low candidate count warrants retry with broader criteria", "confidence": 0.8, "next_steps": ["Broaden search criteria", "Retry search"], "adjustments": {"search_criteria": "broader"}}'
-            elif situation == "low_suitable_count":
-                mock_response_content = '{"action": "adjust", "reasoning": "Low suitable count suggests evaluation criteria may be too strict", "confidence": 0.7, "next_steps": ["Lower evaluation threshold", "Re-evaluate candidates"], "adjustments": {"evaluation_threshold": "lower"}}'
-            else:
-                mock_response_content = '{"action": "continue", "reasoning": "Proceed with available candidates", "confidence": 0.6, "next_steps": ["Continue with current candidates"], "adjustments": {}}'
+            logger.info(f"🤖 GPT-5 Response (first 200 chars): {response_text[:200]}...")
             
-            # Parse AI response (mock implementation)
+            # Parse the response
             try:
-                decision_data = json.loads(mock_response_content)
+                # Extract JSON from response (handle markdown code blocks)
+                if "```json" in response_text:
+                    json_str = response_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in response_text:
+                    json_str = response_text.split("```")[1].split("```")[0].strip()
+                else:
+                    json_str = response_text
+                
+                decision_data = json.loads(json_str)
+                
+                logger.info(f"✅ Parsed decision: {decision_data.get('decision')} (confidence: {decision_data.get('confidence')})")
+                
                 return SourcingManagerDecision(
-                    action=decision_data.get("action", "continue"),
-                    reasoning=decision_data.get("reasoning", "AI decision made"),
-                    confidence=decision_data.get("confidence", 0.7),
-                    next_steps=decision_data.get("next_steps", []),
+                    action=decision_data.get("decision", "continue").upper(),  # Note: new prompt uses 'decision' not 'action'
+                    reasoning=decision_data.get("reasoning", "AI decision based on context"),
+                    confidence=float(decision_data.get("confidence", 0.7)),
+                    next_steps=decision_data.get("next_steps", ["Execute recommended action"]),
                     adjustments=decision_data.get("adjustments", {})
                 )
-            except json.JSONDecodeError:
-                # Fallback to simple parsing
-                if "retry" in mock_response_content.lower():
+                
+            except (json.JSONDecodeError, KeyError, ValueError) as parse_error:
+                logger.warning(f"Failed to parse GPT-5 JSON response: {parse_error}. Using fallback.")
+                # Fallback: extract action from text
+                response_lower = response_text.lower()
+                if "retry" in response_lower:
                     action = "retry"
-                elif "adjust" in mock_response_content.lower():
+                elif "adjust" in response_lower:
                     action = "adjust"
-                elif "escalate" in mock_response_content.lower():
+                elif "escalate" in response_lower:
                     action = "escalate"
-                elif "continue" in mock_response_content.lower():
-                    action = "continue"
-                else:
+                elif "complete" in response_lower:
                     action = "complete"
+                else:
+                    action = "continue"
                 
                 return SourcingManagerDecision(
                     action=action,
-                    reasoning=mock_response_content,
+                    reasoning=response_text,
                     confidence=0.6,
                     next_steps=["Execute recommended action"]
                 )
         
         except Exception as e:
-            logger.warning(f"AI decision making failed, using fallback: {str(e)}")
-            # Fallback decision logic
-            if situation == "low_candidate_count" and workflow_state["retry_count"] < self.max_retries:
+            logger.warning(f"❌ GPT-5 decision making failed: {str(e)}. Using intelligent fallback.")
+            
+            # Intelligent fallback logic
+            candidates_found = workflow_state["metrics"]["total_found"]
+            suitable_count = workflow_state["metrics"]["total_suitable"]
+            retry_count = workflow_state["retry_count"]
+            target = workflow_state.get("target_count", 50)
+            adjustment_level = workflow_state.get("adjustment_level", 1)
+            
+            if situation == "low_candidate_count" and retry_count < self.max_retries and adjustment_level < 4:
                 return SourcingManagerDecision(
-                    action="retry",
-                    reasoning="Fallback: Retry search with adjusted criteria",
-                    confidence=0.5,
-                    next_steps=["Broaden search criteria", "Retry search"]
+                    action="adjust",
+                    reasoning="Fallback: Low candidate count with room for progressive adjustment",
+                    confidence=0.7,
+                    next_steps=[
+                        f"Adjust search criteria to level {adjustment_level + 1}",
+                        "Retry search with broader parameters",
+                        "Maintain quality while expanding reach"
+                    ],
+                    adjustments={"adjustment_level": adjustment_level + 1}
+                )
+            elif situation == "low_suitable_count" and candidates_found > 5:
+                return SourcingManagerDecision(
+                    action="continue",
+                    reasoning="Fallback: Have sufficient candidates despite low suitability - may contain hidden gems",
+                    confidence=0.6,
+                    next_steps=[
+                        "Proceed with available candidates",
+                        "Perform deep profile analysis",
+                        "Look for non-obvious skill matches and growth potential"
+                    ]
                 )
             else:
                 return SourcingManagerDecision(
-                    action="continue",
-                    reasoning="Fallback: Continue with available candidates",
+                    action="complete",
+                    reasoning="Fallback: Accept current results and move forward",
                     confidence=0.5,
-                    next_steps=["Proceed with current candidates"]
+                    next_steps=["Complete current workflow", "Proceed with available candidates"]
                 )
     
     # ---- Enhanced Parsing Methods ----
@@ -854,7 +696,7 @@ class UnifiedSourcingManager:
         search_lookup = {record.linkedin_url: record for record in search_records}
         
         for evaluated_candidate in evaluation_result.get("evaluated_candidates", []):
-            linkedin_url = evaluated_candidate.get("linkedin_url", "")
+            linkedin_url = evaluated_candidate.get("linkedin_url", "") or evaluated_candidate.get("profile_url", "")
             
             # Find existing record or create new one
             if linkedin_url in search_lookup:
@@ -867,10 +709,14 @@ class UnifiedSourcingManager:
                 )
             
             # Update with evaluation data
-            candidate.title = evaluated_candidate.get("title", candidate.title)
-            candidate.company = evaluated_candidate.get("company", candidate.company)
-            candidate.location = evaluated_candidate.get("location", candidate.location)
+            candidate.title = evaluated_candidate.get("title", evaluated_candidate.get("headline", candidate.title))
+            candidate.company = evaluated_candidate.get("company", evaluated_candidate.get("current_company", candidate.company))
+            candidate.location = evaluated_candidate.get("location", evaluated_candidate.get("locatie", candidate.location))
             candidate.skills = evaluated_candidate.get("skills", candidate.skills)
+            candidate.work_experience = evaluated_candidate.get("work_experience", evaluated_candidate.get("experience", candidate.work_experience))
+            candidate.education = evaluated_candidate.get("education", candidate.education)
+            candidate.profile_summary = evaluated_candidate.get("profile_summary", evaluated_candidate.get("summary", candidate.profile_summary))
+            candidate.contact_info = evaluated_candidate.get("contact_info", candidate.contact_info)
             candidate.suitability_status = evaluated_candidate.get("suitability_status", "unknown")
             candidate.suitability_score = evaluated_candidate.get("suitability_score", 0.0)
             candidate.suitability_reasoning = evaluated_candidate.get("suitability_reasoning", "")
@@ -879,6 +725,156 @@ class UnifiedSourcingManager:
             updated_candidates.append(candidate)
         
         return updated_candidates
+
+    def _build_scraping_request(self, candidate_records: List[CandidateRecord], workflow_state: Dict[str, Any]) -> Dict[str, Any]:
+        """Build request payload for profile scraping agent."""
+        candidates_payload = []
+        for record in candidate_records:
+            record_dict = record.dict()
+            # Ensure profile URL is available for scraping
+            record_dict.setdefault("profile_url", record.linkedin_url)
+            record_dict.setdefault("linkedin_url", record.linkedin_url)
+            candidates_payload.append(record_dict)
+        
+        return {
+            "candidates": candidates_payload,
+            "projectid": workflow_state.get("project_id", ""),
+            "project_id": workflow_state.get("project_id", ""),
+            "project_name": workflow_state.get("project_requirements", {}).get("position", ""),
+            "naam_project": f"UnifiedSourcing_{workflow_state.get('project_id', 'unknown')}",
+            "campaign_num": "001",
+            "job_description": workflow_state.get("job_description", ""),
+            "enrichment_config": {
+                "batch_size": 10,
+                "rate_limit_delay": 1,
+                "max_retries": 3
+            }
+        }
+
+    def _apply_enrichment_to_records(
+        self,
+        suitable_records: List[CandidateRecord],
+        enriched_candidates_raw: List[Dict[str, Any]],
+        job_description: str
+    ) -> List[CandidateRecord]:
+        """Merge scraped profile data back into CandidateRecord objects."""
+        updated_records: List[CandidateRecord] = []
+        lookup = {record.linkedin_url: record for record in suitable_records}
+        
+        for enriched in enriched_candidates_raw:
+            linkedin_url = enriched.get("linkedin_url") or enriched.get("profile_url")
+            if not linkedin_url:
+                continue
+            record = lookup.get(linkedin_url)
+            if not record:
+                continue
+            
+            record.profile_enriched = True
+            record.enrichment_timestamp = datetime.now()
+            record.enrichment_details = {
+                **record.enrichment_details,
+                **enriched.get("enrichment_details", {})
+            }
+            record.enrichment_details["enrichment_status"] = enriched.get("enrichment_status", "success")
+            record.enrichment_details["enrichment_source"] = enriched.get("enrichment_source", enriched.get("enrichment_status", "live_scrape"))
+            
+            # Merge enriched fields
+            record.skills = list({*(record.skills or []), *enriched.get("skills", [])})
+            record.work_experience = enriched.get("work_experience") or enriched.get("experience", record.work_experience)
+            record.education = enriched.get("education", record.education)
+            record.profile_summary = enriched.get("profile_summary") or enriched.get("summary") or record.profile_summary
+            record.contact_info = enriched.get("contact_info", record.contact_info)
+            record.location = enriched.get("locatie", record.location)
+            record.title = enriched.get("headline", record.title)
+            record.company = enriched.get("current_company", record.company)
+            record.linkedin_url = linkedin_url or record.linkedin_url
+            
+            relevance = self._compute_relevance(record.skills, record.work_experience, job_description)
+            record.relevant_skills = relevance.get("skills", [])
+            record.relevant_experience = relevance.get("experience", [])
+            
+            updated_records.append(record)
+        
+        # Preserve any suitable records that did not return from scraping
+        remaining = [record for record in suitable_records if record not in updated_records]
+        return updated_records + remaining
+
+    def _re_evaluate_enriched_candidates(self, workflow_state: Dict[str, Any]):
+        """Re-run evaluation using enriched profile data to improve skill/experience matching."""
+        enriched_candidates = workflow_state["candidates_pipeline"].get("enriched", [])
+        if not enriched_candidates:
+            logger.info("No enriched candidates available for re-evaluation")
+            return
+
+        # Ensure each candidate has a linkedin_url for consistent lookups
+        for c in enriched_candidates:
+            if not c.get("linkedin_url") and c.get("profile_url"):
+                c["linkedin_url"] = c.get("profile_url")
+            if not c.get("provider_id"):
+                c["provider_id"] = c.get("linkedin_url", "")
+
+        evaluation_request = {
+            "projectid": workflow_state.get("project_id", ""),
+            "searchid": f"reeval_{workflow_state.get('request_id', '')[:8]}",
+            "naam_project": f"UnifiedSourcing_{workflow_state.get('project_id', 'unknown')}",
+            "campaign_num": "001",
+            "job_requirements": workflow_state.get("job_description", ""),
+            "candidates": enriched_candidates,
+            "evaluation_criteria": workflow_state.get("project_requirements", {})
+        }
+
+        try:
+            evaluation_results = self.evaluation_agent.evaluate_candidates(evaluation_request)
+            parsed_records = self._parse_evaluation_results(
+                evaluation_results,
+                workflow_state["candidates_records"].get("enriched", []) or workflow_state["candidates_records"].get("evaluated", [])
+            )
+
+            workflow_state["candidates_pipeline"]["evaluated"] = evaluation_results.get("evaluated_candidates", enriched_candidates)
+            workflow_state["candidates_records"]["evaluated"] = parsed_records
+
+            suitable_count = len([c for c in parsed_records if c.suitability_status in ["suitable", "maybe", "SUITABLE", "POTENTIALLY_SUITABLE", "HIGHLY_SUITABLE"]])
+            workflow_state["metrics"]["total_suitable"] = suitable_count
+            workflow_state["metrics"]["success_rate"] = suitable_count / len(enriched_candidates) if enriched_candidates else 0.0
+            logger.info(f"🎯 Re-evaluation after enrichment: {suitable_count} suitable/potential out of {len(enriched_candidates)}")
+        except Exception as e:
+            logger.warning(f"⚠️ Re-evaluation after enrichment failed: {e}")
+
+    def _compute_relevance(
+        self,
+        skills: List[str],
+        work_experience: List[Dict[str, Any]],
+        job_description: str
+    ) -> Dict[str, Any]:
+        """Tag which skills and experience items match the job description."""
+        if not job_description:
+            return {"skills": [], "experience": []}
+        
+        tokens = [t.lower() for t in re.split(r"[^a-zA-Z0-9\+]+", job_description) if len(t) > 2]
+        keywords = set(tokens)
+        matched_skills = [s for s in skills if isinstance(s, str) and s.lower() in keywords]
+        matched_skills = matched_skills[:10]
+        
+        matched_experience = []
+        for exp in work_experience or []:
+            combined_text = " ".join([
+                str(exp.get("company", "")),
+                str(exp.get("position", "")),
+                str(exp.get("description", ""))
+            ]).lower()
+            exp_matches = [kw for kw in keywords if kw in combined_text]
+            if exp_matches:
+                matched_experience.append({
+                    "company": exp.get("company", ""),
+                    "position": exp.get("position", ""),
+                    "duration": exp.get("duration", ""),
+                    "matched_keywords": exp_matches[:5]
+                })
+        
+        return {
+            "skills": matched_skills,
+            "experience": matched_experience[:5]
+        }
     
     def _enrich_candidate_record(self, candidate_record: CandidateRecord) -> CandidateRecord:
         """Enrich candidate record with additional data (mock implementation)"""
@@ -1223,22 +1219,50 @@ class UnifiedSourcingManager:
         logger.info("✅ Search criteria adjusted for broader candidate pool")
     
     def _adjust_search_criteria(self, workflow_state: Dict[str, Any]):
-        """Adjust search criteria based on AI decision"""
-        logger.info("🎯 Adjusting search criteria based on AI analysis")
+        """
+        Adjust search criteria progressively based on AI analysis.
+        Implements progressive relaxation strategy: experience → location → skills → target count.
+        """
+        logger.info("🎯 Adjusting search criteria using progressive relaxation strategy")
         
-        # This could be enhanced with more sophisticated AI analysis
         criteria = workflow_state["project_requirements"]
+        adjustment_level = workflow_state.get("adjustment_level", 1)
         
-        # Make criteria more flexible
-        if "required_skills" in criteria and len(criteria["required_skills"]) > 5:
-            # Reduce to must-have skills only
-            criteria["required_skills"] = criteria["required_skills"][:5]
+        # Level 1: Relax experience requirement (reduce by 20%)
+        if adjustment_level >= 1 and "required_years_experience" in criteria:
+            original_exp = criteria["required_years_experience"]
+            criteria["required_years_experience"] = max(0, int(original_exp * 0.8))
+            logger.info(f"  - Relaxed experience requirement: {original_exp} → {criteria['required_years_experience']} years")
         
-        # Add remote option if not present
-        if "remote_ok" not in criteria:
-            criteria["remote_ok"] = True
+        # Level 2: Remove location restriction
+        if adjustment_level >= 2:
+            if "location" in criteria and criteria["location"]:
+                criteria["location"] = ""  # Allow any location
+                criteria["remote_ok"] = True
+                logger.info("  - Removed location restriction, enabled remote candidates")
+            elif "remote_ok" not in criteria:
+                criteria["remote_ok"] = True
+                logger.info("  - Enabled remote candidates")
+        
+        # Level 3: Reduce required skills to must-haves only
+        if adjustment_level >= 3 and "required_skills" in criteria:
+            original_count = len(criteria["required_skills"])
+            if original_count > 3:
+                criteria["required_skills"] = criteria["required_skills"][:3]
+                logger.info(f"  - Reduced required skills: {original_count} → 3 (must-have only)")
+        
+        # Level 4: Increase target candidate count
+        if adjustment_level >= 4:
+            if "target_count" in criteria:
+                original_target = criteria["target_count"]
+                criteria["target_count"] = int(original_target * 1.5)
+                logger.info(f"  - Increased target count: {original_target} → {criteria['target_count']}")
+            else:
+                criteria["target_count"] = 75  # Default increased target
+                logger.info("  - Set increased target count: 75")
         
         workflow_state["project_requirements"] = criteria
+        logger.info(f"✅ Search criteria adjusted at level {adjustment_level}")
     
     def _adjust_evaluation_criteria(self, workflow_state: Dict[str, Any]):
         """Adjust evaluation criteria to be more inclusive"""
@@ -1270,20 +1294,39 @@ class UnifiedSourcingManager:
     
     def _generate_results_without_enrichment(self, workflow_state: Dict[str, Any]) -> Dict[str, Any]:
         """Generate results when skipping enrichment phase"""
+        # Get suitable/maybe records from evaluation (checking both new and old status names)
         suitable_records = [
             c for c in workflow_state["candidates_records"]["evaluated"]
-            if c.suitability_status in ["suitable", "maybe"]
+            if c.suitability_status in ["suitable", "maybe", "SUITABLE", "POTENTIALLY_SUITABLE", "HIGHLY_SUITABLE"]
         ]
+        
+        # Fallback: if no suitable candidates from evaluation, use search phase candidates directly
+        # This ensures we return candidates even if evaluation is conservative
+        if not suitable_records and workflow_state["candidates_pipeline"]["found"]:
+            logger.info("📌 No suitable/potential candidates from evaluation - using search phase candidates as fallback")
+            # Use raw candidates from pipeline (these have actual data from LinkedIn API)
+            candidates_data = workflow_state["candidates_pipeline"]["found"][:10]  # Top 10 from search
+        else:
+            logger.info(f"📌 Returning {len(suitable_records)} suitable/potential candidates from evaluation")
+            # Convert CandidateRecord objects to dicts
+            candidates_data = [record.dict() if hasattr(record, 'dict') else record for record in suitable_records]
+            # If we have suitable but less than 10, supplement with search candidates
+            if len(candidates_data) < 10 and workflow_state["candidates_pipeline"]["found"]:
+                all_search = workflow_state["candidates_pipeline"]["found"]
+                needed = 10 - len(candidates_data)
+                additional = all_search[len(candidates_data):len(candidates_data) + needed]
+                candidates_data.extend(additional)
+                logger.info(f"📌 Supplemented with {len(additional)} candidates from search phase")
         
         return {
             "request_id": workflow_state["request_id"],
             "status": "completed_basic",
             "summary": {
                 "total_found": workflow_state["metrics"]["total_found"],
-                "total_suitable": len(suitable_records),
+                "total_suitable": len(suitable_records) if suitable_records else len(candidates_data),
                 "success_rate": workflow_state["metrics"]["success_rate"]
             },
-            "candidates": [record.dict() for record in suitable_records[:10]],
+            "candidates": candidates_data,
             "note": "Profile enrichment skipped - proceeding with basic candidate data",
             "recommendations": [
                 "Consider manual profile research for top candidates",
@@ -1291,7 +1334,60 @@ class UnifiedSourcingManager:
                 "Schedule enrichment phase for successful initial contacts"
             ]
         }
-    
+
+    def _get_workflow_decision_prompt(
+        self,
+        situation: str,
+        current_stage: str,
+        candidates_found: int,
+        candidates_suitable: int,
+        success_rate: float,
+        retry_count: int,
+        max_retries: int,
+        target_count: int,
+        error_count: int,
+        warning_count: int
+    ) -> str:
+        """
+        Generate workflow decision prompt for AI decision making.
+        
+        Creates a concise decision prompt for the LLM to make workflow decisions
+        based on current pipeline state, metrics, and stage.
+        """
+        return f"""# SOURCING WORKFLOW DECISION
+
+## CURRENT SITUATION: {situation}
+## STAGE: {current_stage}
+
+### METRICS:
+- Found: {candidates_found}/{target_count} candidates
+- Suitable: {candidates_suitable} candidates
+- Success Rate: {success_rate:.1%}
+- Retry Count: {retry_count}/{max_retries}
+- Errors: {error_count}, Warnings: {warning_count}
+
+### DECISION OPTIONS:
+1. CONTINUE: Proceed to next phase (sufficient progress)
+2. RETRY: Retry current phase (similar parameters)
+3. ADJUST: Modify criteria and retry (broaden/narrow requirements)
+4. ESCALATE: Requires human review (critical issue)
+5. COMPLETE: Accept current results (enough candidates)
+
+### DECISION CRITERIA:
+- If suitable candidates >= 60% of target: CONTINUE or COMPLETE
+- If candidates < 30% of target: ADJUST or RETRY
+- If consecutive errors > 2: ESCALATE
+- If success rate > 80%: CONTINUE
+
+Return ONLY valid JSON:
+{{
+  "decision": "CONTINUE|RETRY|ADJUST|ESCALATE|COMPLETE",
+  "reasoning": "explanation",
+  "confidence": 0.85,
+  "next_steps": ["step 1", "step 2"],
+  "adjustments": {{"key": "value"}}
+}}"""
+
     def _generate_error_results(self, workflow_state: Dict[str, Any], error_message: str) -> Dict[str, Any]:
         """Generate error results when workflow fails"""
         return {

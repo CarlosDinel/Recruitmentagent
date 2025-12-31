@@ -17,7 +17,7 @@ load_dotenv()
 class OpenAIConfig:
     """OpenAI API configuration"""
     api_key: str
-    model: str = "gpt-4"
+    model: str = "gpt-5"
     temperature: float = 0.3
     max_tokens: int = 2000
     
@@ -25,7 +25,7 @@ class OpenAIConfig:
     def from_env(cls) -> 'OpenAIConfig':
         return cls(
             api_key=os.getenv("OPENAI_API_KEY", ""),
-            model=os.getenv("OPENAI_MODEL", "gpt-4"),
+            model=os.getenv("OPENAI_MODEL", "gpt-5"),
             temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.3")),
             max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "2000"))
         )

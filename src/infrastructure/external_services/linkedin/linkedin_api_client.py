@@ -207,6 +207,36 @@ class LinkedInAPIClient:
             logger.error(f"Error executing saved search {search_id}: {e}")
             return {"data": [], "has_more": False, "next_cursor": None}
     
+    def get_job_posting(self, job_posting_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch LinkedIn job posting details by ID.
+        
+        Args:
+            job_posting_id: LinkedIn job posting ID
+            
+        Returns:
+            Job posting data with description, company, skills, etc.
+            Returns None if posting not found or API error
+        """
+        try:
+            params = {
+                "account_id": self.account_id
+            }
+            
+            # Attempt to fetch job posting from Unipile API
+            data = self._make_request('GET', f'linkedin/jobs/{job_posting_id}', params=params)
+            
+            if data:
+                logger.info(f"✅ Fetched job posting {job_posting_id}")
+                return data
+            else:
+                logger.warning(f"⚠️ No data returned for job posting {job_posting_id}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Could not fetch job posting {job_posting_id}: {e}")
+            return None
+    
     def get_user_profile(self, provider_public_id: str, linkedin_sections: str = "*") -> Dict[str, Any]:
         """
         Get full LinkedIn profile by public ID.

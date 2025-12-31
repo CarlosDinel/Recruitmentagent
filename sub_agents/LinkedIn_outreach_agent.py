@@ -20,11 +20,47 @@ from tools.outreach_tools import (
     send_outreach_email
 )
 from agents.database_agent import DatabaseAgent
-from prompts.LinkedIn_outreach_agent_prompts import LinkedInOutreachPrompts
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+class LinkedInOutreachPrompts:
+    """Embedded prompts for LinkedIn outreach message generation."""
+    
+    @staticmethod
+    def connection_request_message(candidate_name: str, candidate_info: Dict[str, Any], project_info: Dict[str, Any], user_info: Dict[str, Any]) -> str:
+        return (
+            f"Write a short, personalized LinkedIn connection request for {candidate_name}.\n"
+            f"Their role: {candidate_info.get('current_position', 'Unknown')} at {candidate_info.get('company', 'Unknown')}\n"
+            f"Skills: {', '.join(candidate_info.get('skills', []))}\n"
+            f"Vacancy: {project_info.get('functie', 'Unknown')} at {project_info['project_name']}\n"
+            f"From: {user_info['voornaam']} at {user_info['bedrijfsnaam']}\n"
+            f"Keep it warm, genuine, max 300 chars. Reference shared interests or skills."
+        )
+    
+    @staticmethod
+    def linkedin_message_content(candidate_name: str, candidate_info: Dict[str, Any], project_info: Dict[str, Any], user_info: Dict[str, Any]) -> str:
+        return (
+            f"Write a LinkedIn direct message for {candidate_name}.\n"
+            f"Role: {candidate_info.get('current_position', 'Unknown')} | {candidate_info.get('years_experience', 'Unknown')} years exp\n"
+            f"Skills: {', '.join(candidate_info.get('skills', []))}\n"
+            f"Opportunity: {project_info.get('functie', 'Unknown')} at {project_info.get('company', 'Unknown')}\n"
+            f"From: {user_info['voornaam']}, {user_info.get('functietitel', 'Recruitment Consultant')}\n"
+            f"Max 500 chars. Start with personal observation about their profile, reference specific skills, end with friendly question."
+        )
+    
+    @staticmethod
+    def inmail_content(candidate_name: str, candidate_info: Dict[str, Any], project_info: Dict[str, Any], user_info: Dict[str, Any]) -> str:
+        return (
+            f"Write a LinkedIn InMail with subject and body for {candidate_name}.\n"
+            f"Role: {candidate_info.get('current_position', 'Unknown')} | {candidate_info.get('years_experience', 'Unknown')} years\n"
+            f"Skills: {', '.join(candidate_info.get('skills', []))}\n"
+            f"Opportunity: {project_info.get('functie', 'Unknown')} at {project_info.get('company', 'Unknown')}\n"
+            f"From: {user_info['voornaam']}, {user_info.get('functietitel', 'Recruitment Consultant')}\n\n"
+            "Format:\nSubject: [max 50 chars]\n\nBody: [max 1000 chars, warm opening, clear value match, call-to-action, signature]"
+        )
+
 
 
 class LinkedInOutreachAgent:
@@ -53,7 +89,7 @@ class LinkedInOutreachAgent:
         # Initialize LLM for message generation
         if llm_provider == "openai":
             self.llm = ChatOpenAI(
-                model=os.getenv("OPENAI_MODEL", "gpt-4"),
+                model=os.getenv("OPENAI_MODEL", "gpt-5"),
                 temperature=0.7,
                 api_key=os.getenv("OPENAI_API_KEY")
             )
@@ -367,7 +403,7 @@ class LinkedInOutreachAgent:
         candidate_info: Dict[str, Any],
         project_info: Dict[str, Any]
     ) -> str:
-        """Generate a personalized connection request message."""
+        """Generate a personalized connection request message using embedded prompts."""
         try:
             prompt = LinkedInOutreachPrompts.connection_request_message(
                 candidate_name, candidate_info, project_info, self.user_info
@@ -385,7 +421,7 @@ class LinkedInOutreachAgent:
         candidate_info: Dict[str, Any],
         project_info: Dict[str, Any]
     ) -> str:
-        """Generate a personalized LinkedIn direct message."""
+        """Generate a personalized LinkedIn direct message using embedded prompts."""
         try:
             prompt = LinkedInOutreachPrompts.linkedin_message_content(
                 candidate_name, candidate_info, project_info, self.user_info
@@ -403,7 +439,7 @@ class LinkedInOutreachAgent:
         candidate_info: Dict[str, Any],
         project_info: Dict[str, Any]
     ) -> tuple:
-        """Generate InMail subject and body."""
+        """Generate InMail subject and body using embedded prompts."""
         try:
             prompt = LinkedInOutreachPrompts.inmail_content(
                 candidate_name, candidate_info, project_info, self.user_info

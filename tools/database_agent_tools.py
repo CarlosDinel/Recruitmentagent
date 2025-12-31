@@ -31,7 +31,7 @@ tools_list = [
     "get_candidate_by_id",
     "update_candidate",
     "delete_candidate",
-    
+    "create_indexes",
 ]
 #  ---- Your code here ----
 class DatabaseTools:
@@ -65,6 +65,19 @@ class DatabaseTools:
         db_name = os.getenv('MONGO_DATABASE') or os.getenv('MONGO_DB') or 'test_db'
         self.db = self.client[db_name]
         self.logger = logging.getLogger(__name__)
+
+    def update_candidate_status(self, candidate_id: str, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Instance-safe wrapper to update candidate by id (LinkedIn URL)._id"""
+        try:
+            update_data = dict(update_data or {})
+            update_data["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            result = self.db.candidates.update_one({"_id": candidate_id}, {"$set": update_data})
+            if result.modified_count > 0:
+                return {"success": True, "message": f"Candidate {candidate_id} updated"}
+            return {"success": False, "message": f"Candidate {candidate_id} not found or unchanged"}
+        except Exception as e:
+            self.logger.error(f"update_candidate_status failed: {e}")
+            return {"success": False, "error": str(e)}
 
         
     @tool
@@ -765,4 +778,37 @@ def quick_save_candidate(
             "success": False,
             "error": str(e),
             "message": "Failed to quick save candidate"
-        }
+        }"""Appended create_indexes tool for database_agent_tools.py"""
+
+@tool
+def create_indexes() -> Dict[str, Any]:
+    """
+    Create MongoDB indexes for candidates collection.
+    - Unique sparse index on 'linkedin_url' (prevents duplicates)
+    - Index on 'provider_id' (faster lookups)
+    """
+    try:
+        username = os.getenv('MONGO_USERNAME')
+        password = os.getenv('MONGO_PASSWORD')
+        host = os.getenv('MONGO_HOST')
+        database = os.getenv('MONGO_DATABASE') or os.getenv('MONGO_DB') or 'test_db'
+        if not all([username, password, host, database]):
+            return {"success": False, "error": "MongoDB env vars missing"}
+        uri = f"mongodb+srv://{username}:{password}@{host}/{database}?retryWrites=true&w=majority"
+        client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=10000)
+        db = client[database]
+        results = []
+        try:
+            db.candidates.create_index([('linkedin_url', pymongo.ASCENDING)], unique=True, sparse=True, name='uniq_linkedin_url')
+            results.append({"index": "uniq_linkedin_url", "status": "created"})
+        except Exception as e:
+            results.append({"index": "uniq_linkedin_url", "status": "error", "error": str(e)})
+        try:
+            db.candidates.create_index([('provider_id', pymongo.ASCENDING)], name='idx_provider_id')
+            results.append({"index": "idx_provider_id", "status": "created"})
+        except Exception as e:
+            results.append({"index": "idx_provider_id", "status": "error", "error": str(e)})
+        client.close()
+        return {"success": True, "message": "Index creation attempted", "results": results}
+    except Exception as e:
+        return {"success": False, "error": str(e)}

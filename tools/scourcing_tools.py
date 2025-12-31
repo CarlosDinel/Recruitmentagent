@@ -6,8 +6,34 @@ import json
 from datetime import datetime
 from langchain.tools import tool
 
-# Set up logging
+# Set up logging with enhanced diagnostics
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# DIAGNOSTIC MODE - Set to True for detailed search debugging
+# ============================================================================
+DIAGNOSTIC_MODE = False
+
+def _diagnostic_log(message: str, data: Any = None, level: str = "info"):
+    """Log diagnostic information when DIAGNOSTIC_MODE is enabled."""
+    if not DIAGNOSTIC_MODE:
+        return
+    
+    prefix = "🔬 [DIAGNOSTIC]"
+    if level == "info":
+        logger.info(f"{prefix} {message}")
+    elif level == "warning":
+        logger.warning(f"{prefix} {message}")
+    elif level == "error":
+        logger.error(f"{prefix} {message}")
+    elif level == "debug":
+        logger.debug(f"{prefix} {message}")
+    
+    if data is not None:
+        if isinstance(data, dict):
+            logger.info(f"{prefix} Data: {json.dumps(data, indent=2, default=str)[:2000]}")
+        else:
+            logger.info(f"{prefix} Data: {str(data)[:2000]}")
 
 # ---- Configuration ----
 UNIPILE_BASE_URL = "https://api.unipile.com/v1"
@@ -59,9 +85,31 @@ def search_candidates_integrated_cursor_and_no_cursor(
     """
     logger.info(f"🔍 Starting LinkedIn candidate search for project {project_id}, search {search_id}")
     
+    # DIAGNOSTIC: Log all input parameters
+    _diagnostic_log("=" * 60)
+    _diagnostic_log("LINKEDIN TOOL: search_candidates_integrated_cursor_and_no_cursor")
+    _diagnostic_log("=" * 60)
+    _diagnostic_log(f"Input Parameters:")
+    _diagnostic_log(f"  project_id: {project_id}")
+    _diagnostic_log(f"  search_id: {search_id}")
+    _diagnostic_log(f"  max_results: {max_results}")
+    _diagnostic_log(f"  location: '{location}'")
+    _diagnostic_log(f"  keywords: '{keywords}'")
+    _diagnostic_log(f"  company_name: '{company_name}'")
+    _diagnostic_log(f"  job_title: '{job_title}'")
+    _diagnostic_log(f"  skills: '{skills}'")
+    _diagnostic_log(f"  experience_level: '{experience_level}'")
+    _diagnostic_log(f"  use_cursor: {use_cursor}")
+    
+    # Check if all search params are empty
+    if not any([location, keywords, company_name, job_title, skills, experience_level]):
+        _diagnostic_log("⚠️ ALL SEARCH PARAMETERS ARE EMPTY!", level="warning")
+        _diagnostic_log("This will likely result in no candidates being found!", level="warning")
+    
     try:
         # Parse skills from comma-separated string
         skills_list = [skill.strip() for skill in skills.split(",") if skill.strip()] if skills else []
+        _diagnostic_log(f"Parsed skills_list: {skills_list}")
         
         # Prepare search criteria
         search_criteria = _prepare_search_criteria(
@@ -74,19 +122,32 @@ def search_candidates_integrated_cursor_and_no_cursor(
         )
         
         logger.info(f"📋 Search criteria prepared: {search_criteria}")
+        _diagnostic_log("Prepared search_criteria:", search_criteria)
         
         # Execute search strategy
+        _diagnostic_log(f">>> Executing search with cursor={use_cursor}...")
         if use_cursor:
             candidates = _search_with_cursor_pagination(search_criteria, max_results)
         else:
             candidates = _search_without_cursor(search_criteria, max_results)
         
+        _diagnostic_log(f"Raw API returned {len(candidates)} candidates")
+        if candidates:
+            _diagnostic_log(f"First raw candidate sample:", candidates[0] if candidates else "None")
+        else:
+            _diagnostic_log("⚠️ LinkedIn API returned ZERO candidates!", level="warning")
+        
         # Process and enrich candidate data
         processed_candidates = []
+        skipped_count = 0
         for candidate in candidates:
             processed_candidate = _process_candidate_data(candidate)
             if processed_candidate:
                 processed_candidates.append(processed_candidate)
+            else:
+                skipped_count += 1
+        
+        _diagnostic_log(f"Processing complete: {len(processed_candidates)} valid, {skipped_count} skipped")
         
         # Prepare response
         response = {
@@ -133,7 +194,14 @@ def _prepare_search_criteria(
     skills: List[str],
     experience_level: str
 ) -> Dict[str, Any]:
-    """Prepare search criteria for LinkedIn API."""
+    """
+    Prepare search criteria for LinkedIn API.
+    
+    IMPROVED: Simplified query construction for better LinkedIn results.
+    - Prioritizes job title and keywords over skills
+    - Avoids cluttering query with too many terms
+    - Location is passed as separate filter, not in query string
+    """
     
     criteria = {
         "type": "people",
@@ -141,42 +209,58 @@ def _prepare_search_criteria(
         "query_parts": []
     }
     
-    # Location filter
+    # Location filter (keep separate, don't add to query - let API handle it)
     if location:
         criteria["filters"]["location"] = location
-        criteria["query_parts"].append(f"location:{location}")
+        # Note: Location is NOT added to query_parts - it's a separate API filter
     
-    # Keywords filter
+    # Build a focused query - prioritize job title
+    primary_query_parts = []
+    
+    # Job title is most important for finding relevant candidates
+    if job_title:
+        criteria["filters"]["job_title"] = job_title
+        primary_query_parts.append(job_title)
+    
+    # Add keywords (but limit to avoid cluttering)
     if keywords:
         criteria["filters"]["keywords"] = keywords
-        criteria["query_parts"].append(keywords)
+        # Only add first 3-4 significant keywords
+        keyword_list = [k.strip() for k in keywords.split() if len(k.strip()) > 2]
+        primary_query_parts.extend(keyword_list[:4])
     
     # Company filter
     if company_name:
         criteria["filters"]["current_company"] = company_name
-        criteria["query_parts"].append(f"company:{company_name}")
+        primary_query_parts.append(company_name)
     
-    # Job title filter
-    if job_title:
-        criteria["filters"]["job_title"] = job_title
-        criteria["query_parts"].append(f"title:{job_title}")
-    
-    # Skills filter
+    # Skills - add to filters but limit query impact
     if skills:
         criteria["filters"]["skills"] = skills
-        for skill in skills:
-            criteria["query_parts"].append(f"skill:{skill}")
+        # Only add top 2 skills to query to avoid over-filtering
+        for skill in skills[:2]:
+            primary_query_parts.append(skill)
     
-    # Experience level filter
+    # Experience level - add to filters, optional query modifier
     if experience_level:
         criteria["filters"]["experience_level"] = experience_level
         if experience_level.lower() in ["senior", "lead", "principal"]:
-            criteria["query_parts"].append("senior OR lead OR principal")
+            primary_query_parts.append("senior")
         elif experience_level.lower() in ["junior", "entry"]:
-            criteria["query_parts"].append("junior OR entry OR graduate")
+            primary_query_parts.append("junior")
     
-    # Construct final query
-    criteria["query"] = " ".join(criteria["query_parts"]) if criteria["query_parts"] else ""
+    # Construct final query - deduplicate and limit
+    seen = set()
+    unique_parts = []
+    for part in primary_query_parts:
+        part_lower = part.lower()
+        if part_lower not in seen:
+            seen.add(part_lower)
+            unique_parts.append(part)
+    
+    # Limit query to avoid being too restrictive
+    criteria["query_parts"] = unique_parts[:6]
+    criteria["query"] = " ".join(unique_parts[:6]) if unique_parts else ""
     
     return criteria
 
@@ -255,9 +339,15 @@ def _process_candidate_data(candidate_raw: Dict[str, Any]) -> Optional[Dict[str,
     """Process and structure raw candidate data from LinkedIn API."""
     
     try:
+        # Determine profile URLs and identifiers
+        profile_url = candidate_raw.get("profile_url") or candidate_raw.get("linkedin_url")
+        if not profile_url and candidate_raw.get("id"):
+            profile_url = f"https://linkedin.com/in/{candidate_raw.get('id')}"
+        provider_id = candidate_raw.get("provider_id") or candidate_raw.get("id", "")
+
         # Extract basic information
         processed = {
-            "provider_id": candidate_raw.get("id", ""),
+            "provider_id": provider_id,
             "naam": _extract_full_name(candidate_raw),
             "positie": candidate_raw.get("current_position", ""),
             "headline": candidate_raw.get("headline", ""),
@@ -266,7 +356,8 @@ def _process_candidate_data(candidate_raw: Dict[str, Any]) -> Optional[Dict[str,
             "skills": _extract_skills(candidate_raw),
             "LinkedIn_Beschrijving": candidate_raw.get("summary", ""),
             "otw": _assess_open_to_work(candidate_raw),
-            "profile_url": candidate_raw.get("profile_url", ""),
+            "profile_url": profile_url or "",
+            "linkedin_url": profile_url or "",
             "current_company": _extract_current_company(candidate_raw),
             "previous_companies": _extract_previous_companies(candidate_raw),
             "education": _extract_education(candidate_raw),
@@ -275,7 +366,7 @@ def _process_candidate_data(candidate_raw: Dict[str, Any]) -> Optional[Dict[str,
         }
         
         # Validate required fields
-        if not processed["provider_id"] or not processed["naam"]:
+        if not processed["provider_id"] or not processed["naam"] or not processed["linkedin_url"]:
             logger.warning(f"⚠️ Skipping candidate with missing required fields")
             return None
         
@@ -429,13 +520,22 @@ def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
     Real LinkedIn API call using Unipile API.
     Falls back to mock if API is not available or fails.
     """
+    # DIAGNOSTIC: Log API call entry
+    _diagnostic_log("-" * 40)
+    _diagnostic_log("LINKEDIN API CALL (_real_linkedin_api_call)")
+    _diagnostic_log("-" * 40)
+    _diagnostic_log("Search params received:", search_params)
+    _diagnostic_log(f"LinkedIn client available: {_LINKEDIN_CLIENT_AVAILABLE}")
+    
     # Try to use new LinkedIn API client
     if _LINKEDIN_CLIENT_AVAILABLE:
         try:
             from src.infrastructure.external_services.linkedin.linkedin_api_client import LinkedInAPIClient
+            _diagnostic_log("✅ LinkedInAPIClient imported successfully")
             
             # Create client instance
             client = LinkedInAPIClient()
+            _diagnostic_log("✅ LinkedInAPIClient instantiated")
             
             # Extract search parameters
             query = search_params.get("query", "")
@@ -467,6 +567,14 @@ def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
             search_query = " ".join(query_parts) if query_parts else None
             
             logger.info(f"🔍 Real LinkedIn API search: query='{search_query}', location='{location}', limit={limit}")
+            _diagnostic_log(f">>> Calling client.search_people()...")
+            _diagnostic_log(f"    query: '{search_query}'")
+            _diagnostic_log(f"    location: '{location}'")
+            _diagnostic_log(f"    company: '{company}'")
+            _diagnostic_log(f"    title: '{title}'")
+            _diagnostic_log(f"    skills: {skills}")
+            _diagnostic_log(f"    limit: {limit}")
+            _diagnostic_log(f"    cursor: {cursor}")
             
             # Make synchronous API call using correct Unipile format
             result = client.search_people(
@@ -480,8 +588,13 @@ def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
                 api_type="classic"  # Use classic API (most compatible)
             )
             
+            _diagnostic_log(f">>> API call completed")
+            _diagnostic_log(f"Raw result keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
+            _diagnostic_log(f"Result type: {type(result).__name__}")
+            
             # Transform result to expected format
             items = result.get("items", result.get("data", []))
+            _diagnostic_log(f"Items extracted: {len(items)} candidates")
             
             # Map LinkedIn API response to expected format
             candidates = []
@@ -515,6 +628,9 @@ def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
                 candidates.append(candidate)
             
             logger.info(f"✅ Real LinkedIn API successful: {len(candidates)} candidates found")
+            _diagnostic_log(f"✅ LinkedIn API call SUCCESS: {len(candidates)} candidates")
+            if candidates:
+                _diagnostic_log(f"First candidate from API:", candidates[0])
             
             return {
                 "data": candidates,
@@ -524,12 +640,17 @@ def _real_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
             
         except Exception as e:
             logger.error(f"❌ Real LinkedIn API error: {e}")
+            _diagnostic_log(f"❌ LinkedIn API EXCEPTION: {str(e)}", level="error")
             import traceback
+            _diagnostic_log(f"Traceback: {traceback.format_exc()}", level="error")
             logger.debug(traceback.format_exc())
             # Fall through to mock implementation
+    else:
+        _diagnostic_log("⚠️ LinkedInAPIClient not available, using fallback", level="warning")
     
     # Fallback to mock if new infrastructure not available or error occurred
     logger.warning("⚠️ Using mock LinkedIn API (fallback - set LINKEDIN_API_KEY to use real API)")
+    _diagnostic_log(">>> Falling back to MOCK LinkedIn API")
     return _mock_linkedin_api_call(search_params)
 
 def _mock_linkedin_api_call(search_params: Dict[str, Any]) -> Dict[str, Any]:
@@ -927,173 +1048,319 @@ def _scrape_profile_data(profile_url: str, profile_id: str) -> Dict[str, Any]:
     return mock_profile
 
 def _parse_job_requirements(job_description: str) -> Dict[str, Any]:
-    """Parse job description to extract requirements."""
+    """Parse job description to extract requirements using LLM for intelligent analysis."""
     
-    # Simple keyword-based parsing (replace with more sophisticated NLP)
-    requirements = {
-        "required_skills": [],
-        "preferred_skills": [],
-        "experience_years": 0,
-        "education_level": "",
-        "location": "",
-        "job_title": "",
-        "industry": ""
-    }
-    
-    description_lower = job_description.lower()
-    
-    # Extract common tech skills
-    tech_skills = [
-        "python", "javascript", "java", "react", "node.js", "sql", "mongodb",
-        "aws", "docker", "kubernetes", "git", "agile", "scrum", "html", "css"
-    ]
-    
-    for skill in tech_skills:
-        if skill in description_lower:
-            requirements["required_skills"].append(skill.title())
-    
-    # Extract experience requirements
-    import re
-    exp_patterns = [
-        r"(\d+)\+?\s*years?\s*(?:of\s*)?experience",
-        r"(\d+)\+?\s*years?\s*in",
-        r"minimum\s*(\d+)\s*years?"
-    ]
-    
-    for pattern in exp_patterns:
-        match = re.search(pattern, description_lower)
-        if match:
-            requirements["experience_years"] = int(match.group(1))
-            break
-    
-    # Extract location if mentioned
-    locations = ["amsterdam", "rotterdam", "utrecht", "den haag", "netherlands"]
-    for location in locations:
-        if location in description_lower:
-            requirements["location"] = location.title()
-            break
-    
-    return requirements
+    try:
+        from langchain_openai import ChatOpenAI
+        from langchain.schema import HumanMessage, SystemMessage
+        
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        
+        system_prompt = """You are an expert job requirements analyst. Extract structured requirements from job descriptions.
+        
+Output valid JSON with this exact structure:
+{
+  "required_skills": ["skill1", "skill2", ...],
+  "preferred_skills": ["skill1", "skill2", ...],
+  "experience_years": 0,
+  "education_level": "",
+  "location": "",
+  "job_title": "",
+  "industry": ""
+}
+
+Extract ALL skills mentioned (technical, soft skills, domain knowledge, tools, etc.).
+Be comprehensive and accurate. If information is not mentioned, use empty string or 0."""
+        
+        human_prompt = f"""Extract requirements from this job description:
+
+{job_description}
+
+Return ONLY valid JSON, no additional text."""
+        
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt)
+        ]
+        
+        response = llm.invoke(messages)
+        response_text = response.content.strip()
+        
+        # Clean markdown code blocks if present
+        if response_text.startswith("```json"):
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif response_text.startswith("```"):
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+        
+        requirements = json.loads(response_text)
+        logger.info(f"📝 Extracted requirements via LLM: {len(requirements.get('required_skills', []))} required skills, {requirements.get('experience_years', 0)} years experience")
+        
+        return requirements
+        
+    except Exception as e:
+        logger.warning(f"⚠️ LLM parsing failed, using fallback: {e}")
+        
+        # Fallback to basic parsing
+        requirements = {
+            "required_skills": [],
+            "preferred_skills": [],
+            "experience_years": 0,
+            "education_level": "",
+            "location": "",
+            "job_title": "",
+            "industry": ""
+        }
+        
+        description_lower = job_description.lower()
+        
+        # Extract common skills (broader list)
+        common_skills = [
+            "python", "javascript", "java", "react", "node.js", "sql", "mongodb",
+            "aws", "docker", "kubernetes", "git", "agile", "scrum", "html", "css",
+            "accounting", "excel", "powerpoint", "word", "finance", "bookkeeping",
+            "leadership", "management", "communication", "teamwork", "problem solving"
+        ]
+        
+        for skill in common_skills:
+            if skill in description_lower:
+                requirements["required_skills"].append(skill.title())
+        
+        # Extract experience requirements
+        import re
+        exp_patterns = [
+            r"(\d+)\+?\s*years?\s*(?:of\s*)?experience",
+            r"(\d+)\+?\s*years?\s*in",
+            r"minimum\s*(\d+)\s*years?"
+        ]
+        
+        for pattern in exp_patterns:
+            match = re.search(pattern, description_lower)
+            if match:
+                requirements["experience_years"] = int(match.group(1))
+                break
+        
+        # Extract location if mentioned
+        locations = ["amsterdam", "rotterdam", "utrecht", "den haag", "netherlands"]
+        for location in locations:
+            if location in description_lower:
+                requirements["location"] = location.title()
+                break
+        
+        logger.info(f"📝 Fallback extraction: {len(requirements['required_skills'])} skills")
+        return requirements
 
 def _analyze_candidate_match(candidate: Dict[str, Any], job_requirements: Dict[str, Any]) -> Dict[str, Any]:
-    """Analyze how well a candidate matches job requirements."""
+    """Analyze how well a candidate matches job requirements using LLM for intelligent evaluation."""
     
-    # Skills matching
-    candidate_skills = [skill.lower() for skill in candidate.get("skills", [])]
-    required_skills = [skill.lower() for skill in job_requirements.get("required_skills", [])]
-    
-    if required_skills:
-        matched_skills = [skill for skill in required_skills if skill in candidate_skills]
-        skills_score = (len(matched_skills) / len(required_skills)) * 100
-        missing_skills = [skill for skill in required_skills if skill not in candidate_skills]
-    else:
-        matched_skills = []
-        skills_score = 50  # Neutral score when no requirements specified
-        missing_skills = []
-    
-    # Experience matching
-    candidate_experience = _calculate_total_experience(candidate)
-    required_experience = job_requirements.get("experience_years", 0)
-    
-    if required_experience > 0:
-        if candidate_experience >= required_experience:
-            experience_score = 100
-        elif candidate_experience >= required_experience * 0.8:
-            experience_score = 80
-        elif candidate_experience >= required_experience * 0.6:
-            experience_score = 60
+    try:
+        from langchain_openai import ChatOpenAI
+        from langchain.schema import HumanMessage, SystemMessage
+        
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        
+        # Prepare candidate summary
+        candidate_skills = candidate.get("skills", [])
+        candidate_title = candidate.get("title", candidate.get("headline", ""))
+        candidate_company = candidate.get("company", "")
+        candidate_location = candidate.get("location", candidate.get("locatie", ""))
+        candidate_experience = candidate.get("experience", [])
+        
+        system_prompt = """You are an expert recruiter evaluating candidate fit. Analyze the candidate against job requirements and provide detailed scoring.
+
+Output valid JSON with this EXACT structure:
+{
+  "overall_score": 0.0,
+  "skills_match": {
+    "score": 0.0,
+    "matched_skills": ["skill1", "skill2"],
+    "missing_skills": ["skill3", "skill4"]
+  },
+  "experience_match": {
+    "score": 0.0,
+    "relevant_experience": "X years in relevant roles",
+    "experience_gap": "Description of any gaps"
+  },
+  "location_match": {
+    "score": 0.0,
+    "distance": "Local/Remote/Relocation required"
+  },
+  "education_match": {
+    "score": 0.0,
+    "relevant_education": ["degree info"]
+  },
+  "recommendation": "Brief recommendation",
+  "strengths": ["strength1", "strength2"],
+  "concerns": ["concern1", "concern2"]
+}
+
+Scoring guide (0-100):
+- 90-100: Exceptional match
+- 80-89: Strong match
+- 70-79: Good match
+- 60-69: Acceptable match
+- 50-59: Marginal match
+- Below 50: Poor match
+
+Be honest and evidence-based. Consider skill transferability and potential."""
+        
+        human_prompt = f"""Evaluate this candidate:
+
+CANDIDATE:
+- Name: {candidate.get('name', candidate.get('naam', 'Unknown'))}
+- Current Role: {candidate_title}
+- Company: {candidate_company}
+- Location: {candidate_location}
+- Skills: {', '.join(candidate_skills) if candidate_skills else 'Not specified'}
+- Experience: {len(candidate_experience)} positions listed
+
+JOB REQUIREMENTS:
+- Required Skills: {', '.join(job_requirements.get('required_skills', [])) if job_requirements.get('required_skills') else 'Not specified'}
+- Preferred Skills: {', '.join(job_requirements.get('preferred_skills', [])) if job_requirements.get('preferred_skills') else 'Not specified'}
+- Experience Required: {job_requirements.get('experience_years', 0)} years
+- Location: {job_requirements.get('location', 'Not specified')}
+- Job Title: {job_requirements.get('job_title', 'Not specified')}
+
+Provide detailed evaluation. Return ONLY valid JSON."""
+        
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt)
+        ]
+        
+        response = llm.invoke(messages)
+        response_text = response.content.strip()
+        
+        # Clean markdown code blocks if present
+        if response_text.startswith("```json"):
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif response_text.startswith("```"):
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+        
+        match_analysis = json.loads(response_text)
+        logger.info(f"🤖 LLM evaluation: {match_analysis.get('overall_score', 0):.1f}% overall, {len(match_analysis.get('skills_match', {}).get('matched_skills', []))} skills matched")
+        
+        return match_analysis
+        
+    except Exception as e:
+        logger.warning(f"⚠️ LLM evaluation failed, using fallback: {e}")
+        
+        # Fallback to algorithmic matching
+        candidate_skills = [skill.lower() for skill in candidate.get("skills", [])]
+        required_skills = [skill.lower() for skill in job_requirements.get("required_skills", [])]
+        
+        if required_skills:
+            matched_skills = [skill for skill in required_skills if skill in candidate_skills]
+            skills_score = (len(matched_skills) / len(required_skills)) * 100
+            missing_skills = [skill for skill in required_skills if skill not in candidate_skills]
         else:
-            experience_score = 40
-    else:
-        experience_score = 70  # Neutral score
-    
-    # Location matching
-    candidate_location = candidate.get("locatie", "").lower()
-    required_location = job_requirements.get("location", "").lower()
-    
-    if required_location and candidate_location:
-        if required_location in candidate_location or candidate_location in required_location:
-            location_score = 100
-        elif "netherlands" in candidate_location and "netherlands" in required_location:
-            location_score = 80
+            matched_skills = []
+            skills_score = 50
+            missing_skills = []
+        
+        # Experience matching
+        candidate_experience = _calculate_total_experience(candidate)
+        required_experience = job_requirements.get("experience_years", 0)
+        
+        if required_experience > 0:
+            if candidate_experience >= required_experience:
+                experience_score = 100
+            elif candidate_experience >= required_experience * 0.8:
+                experience_score = 80
+            elif candidate_experience >= required_experience * 0.6:
+                experience_score = 60
+            else:
+                experience_score = 40
         else:
-            location_score = 30
-    else:
-        location_score = 70  # Neutral score
-    
-    # Education matching (basic)
-    education_score = 75  # Default neutral score
-    candidate_education = candidate.get("education", [])
-    if candidate_education:
-        # Check for relevant degrees
-        for edu in candidate_education:
-            degree = edu.get("degree", "").lower()
-            field = edu.get("field_of_study", "").lower()
-            if any(term in degree or term in field for term in ["computer", "software", "engineering", "technology"]):
-                education_score = 90
-                break
-    
-    # Overall score (weighted average)
-    overall_score = (
-        skills_score * 0.4 +
-        experience_score * 0.3 +
-        location_score * 0.2 +
-        education_score * 0.1
-    )
-    
-    # Generate recommendation
-    if overall_score >= 80:
-        recommendation = "Strong candidate - highly recommended for interview"
-    elif overall_score >= 65:
-        recommendation = "Good candidate - recommend for phone screening"
-    elif overall_score >= 50:
-        recommendation = "Potential candidate - consider with reservations"
-    else:
-        recommendation = "Weak match - not recommended unless other factors compensate"
-    
-    # Identify strengths and concerns
-    strengths = []
-    concerns = []
-    
-    if skills_score >= 80:
-        strengths.append("Excellent technical skills match")
-    elif skills_score < 50:
-        concerns.append("Limited technical skills alignment")
-    
-    if experience_score >= 80:
-        strengths.append("Strong relevant experience")
-    elif experience_score < 50:
-        concerns.append("Insufficient experience level")
-    
-    if location_score >= 80:
-        strengths.append("Good location match")
-    elif location_score < 50:
-        concerns.append("Location mismatch may require relocation")
-    
-    return {
-        "overall_score": round(overall_score, 1),
-        "skills_match": {
-            "score": round(skills_score, 1),
-            "matched_skills": [skill.title() for skill in matched_skills],
-            "missing_skills": [skill.title() for skill in missing_skills]
-        },
-        "experience_match": {
-            "score": round(experience_score, 1),
-            "relevant_experience": f"{candidate_experience} years",
-            "experience_gap": f"Requires {required_experience} years minimum" if candidate_experience < required_experience else "Meets requirement"
-        },
-        "location_match": {
-            "score": round(location_score, 1),
-            "distance": "Local" if location_score >= 80 else "Remote/Relocation required"
-        },
-        "education_match": {
-            "score": round(education_score, 1),
-            "relevant_education": [edu.get("degree", "") + " in " + edu.get("field_of_study", "") for edu in candidate.get("education", [])]
-        },
-        "recommendation": recommendation,
-        "strengths": strengths,
-        "concerns": concerns
-    }
+            experience_score = 70
+        
+        # Location matching
+        candidate_location = candidate.get("locatie", candidate.get("location", "")).lower()
+        required_location = job_requirements.get("location", "").lower()
+        
+        if required_location and candidate_location:
+            if required_location in candidate_location or candidate_location in required_location:
+                location_score = 100
+            elif "netherlands" in candidate_location and "netherlands" in required_location:
+                location_score = 80
+            else:
+                location_score = 30
+        else:
+            location_score = 70
+        
+        # Education matching
+        education_score = 75
+        candidate_education = candidate.get("education", [])
+        if candidate_education:
+            for edu in candidate_education:
+                degree = edu.get("degree", "").lower()
+                field = edu.get("field_of_study", "").lower()
+                if any(term in degree or term in field for term in ["computer", "software", "engineering", "technology", "accounting", "finance", "business"]):
+                    education_score = 90
+                    break
+        
+        # Overall score (weighted average)
+        overall_score = (
+            skills_score * 0.4 +
+            experience_score * 0.3 +
+            location_score * 0.2 +
+            education_score * 0.1
+        )
+        
+        # Generate recommendation
+        if overall_score >= 80:
+            recommendation = "Strong candidate - highly recommended for interview"
+        elif overall_score >= 65:
+            recommendation = "Good candidate - recommend for phone screening"
+        elif overall_score >= 50:
+            recommendation = "Potential candidate - consider with reservations"
+        else:
+            recommendation = "Weak match - not recommended unless other factors compensate"
+        
+        # Identify strengths and concerns
+        strengths = []
+        concerns = []
+        
+        if skills_score >= 80:
+            strengths.append("Excellent technical skills match")
+        elif skills_score < 50:
+            concerns.append("Limited technical skills alignment")
+        
+        if experience_score >= 80:
+            strengths.append("Strong relevant experience")
+        elif experience_score < 50:
+            concerns.append("Insufficient experience level")
+        
+        if location_score >= 80:
+            strengths.append("Good location match")
+        elif location_score < 50:
+            concerns.append("Location mismatch may require relocation")
+        
+        logger.info(f"📊 Fallback evaluation: {overall_score:.1f}% overall")
+        
+        return {
+            "overall_score": round(overall_score, 1),
+            "skills_match": {
+                "score": round(skills_score, 1),
+                "matched_skills": [skill.title() for skill in matched_skills],
+                "missing_skills": [skill.title() for skill in missing_skills]
+            },
+            "experience_match": {
+                "score": round(experience_score, 1),
+                "relevant_experience": f"{candidate_experience} years",
+                "experience_gap": f"Requires {required_experience} years minimum" if candidate_experience < required_experience else "Meets requirement"
+            },
+            "location_match": {
+                "score": round(location_score, 1),
+                "distance": "Local" if location_score >= 80 else "Remote/Relocation required"
+            },
+            "education_match": {
+                "score": round(education_score, 1),
+                "relevant_education": [edu.get("degree", "") + " in " + edu.get("field_of_study", "") for edu in candidate.get("education", [])]
+            },
+            "recommendation": recommendation,
+            "strengths": strengths,
+            "concerns": concerns
+        }
 
 def _calculate_total_experience(candidate: Dict[str, Any]) -> int:
     """Calculate total years of experience for a candidate."""

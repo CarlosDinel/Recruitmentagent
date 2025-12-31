@@ -312,19 +312,25 @@ class SourcingManagerOrchestrator:
         requirements: Dict[str, Any],
         target_count: int
     ) -> Dict[str, Any]:
-        """Search candidates using use case."""
+        """Search candidates using use case with AI-powered search query generation."""
         try:
-            # Prepare search request
+            # Generate intelligent search parameters from job requirements
+            search_params = await self._generate_search_parameters(project, requirements)
+            
+            # Prepare search request with AI-generated parameters
             search_request = SearchCandidatesRequest(
                 project_id=str(project.id),
                 search_criteria=requirements,
                 max_results=target_count,
-                location=project.location,
-                keywords=requirements.get('position'),
-                job_title=requirements.get('position'),
-                skills=project.skills_needed.to_list() if hasattr(project.skills_needed, 'to_list') else requirements.get('skills', []),
-                experience_level=str(requirements.get('experience_required', ''))
+                location=search_params.get('location') or project.location,
+                keywords=search_params.get('keywords'),
+                job_title=search_params.get('job_title'),
+                skills=search_params.get('skills', []),
+                experience_level=search_params.get('experience_level')
             )
+            
+            self.logger.info(f"🔍 AI-generated search params: keywords='{search_params.get('keywords')}', "
+                           f"job_title='{search_params.get('job_title')}', skills={search_params.get('skills', [])}")
             
             # Execute use case
             search_response: SearchCandidatesResponse = await self.search_candidates_use_case.execute(search_request)
@@ -342,6 +348,91 @@ class SourcingManagerOrchestrator:
                 'success': False,
                 'error': str(e),
                 'candidates': []
+            }
+    
+    async def _generate_search_parameters(
+        self,
+        project: Project,
+        requirements: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Use LLM to intelligently generate LinkedIn search parameters from job requirements.
+        
+        This ensures we search for the RIGHT candidates (e.g., accountants for accounting jobs,
+        not developers).
+        """
+        try:
+            from langchain_openai import ChatOpenAI
+            from langchain.schema import SystemMessage, HumanMessage
+            import json
+            
+            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+            
+            # Extract job details
+            position = requirements.get('position', project.title)
+            description = requirements.get('description', project.description)
+            skills_needed = project.skills_needed.to_list() if hasattr(project.skills_needed, 'to_list') else requirements.get('skills', [])
+            
+            system_prompt = """You are an expert LinkedIn recruiter. Generate precise search parameters to find candidates on LinkedIn.
+
+Output valid JSON with this structure:
+{
+  "job_title": "exact job title to search for",
+  "keywords": "relevant keywords and terms (comma-separated)",
+  "skills": ["skill1", "skill2", "skill3"],
+  "experience_level": "Junior/Mid/Senior/Executive",
+  "location": "location if specified"
+}
+
+Guidelines:
+- job_title: The exact role title candidates should have (e.g., "Accountant", "Software Engineer")
+- keywords: Related terms, synonyms, alternative titles (e.g., for accountant: "financial accounting, bookkeeping, CPA")
+- skills: Top 3-5 most relevant skills for this role
+- experience_level: Appropriate seniority level
+- Be domain-specific: accountant jobs need accounting terms, not tech terms
+
+Return ONLY valid JSON."""
+
+            human_prompt = f"""Generate LinkedIn search parameters for this role:
+
+Position: {position}
+Required Skills: {', '.join(skills_needed) if skills_needed else 'Not specified'}
+Description: {description}
+
+Return precise search parameters to find qualified candidates."""
+
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=human_prompt)
+            ]
+            
+            response = llm.invoke(messages)
+            response_text = response.content.strip()
+            
+            # Clean markdown if present
+            if response_text.startswith("```json"):
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif response_text.startswith("```"):
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+            
+            search_params = json.loads(response_text)
+            self.logger.info(f"✅ AI-generated search parameters: {search_params}")
+            
+            return search_params
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ AI search parameter generation failed: {e}, using fallback")
+            
+            # Fallback to basic extraction
+            position = requirements.get('position', project.title)
+            skills_needed = project.skills_needed.to_list() if hasattr(project.skills_needed, 'to_list') else requirements.get('skills', [])
+            
+            return {
+                'job_title': position,
+                'keywords': position,
+                'skills': skills_needed,
+                'experience_level': str(requirements.get('experience_required', '')),
+                'location': project.location
             }
     
     async def _evaluate_candidates(

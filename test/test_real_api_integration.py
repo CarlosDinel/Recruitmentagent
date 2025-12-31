@@ -12,8 +12,12 @@ Skip with: pytest test/ --ignore=test/test_real_api_integration.py
 import pytest
 import json
 import os
+import sys
 from typing import Dict, Any
 from dotenv import load_dotenv
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Load environment variables
 load_dotenv()

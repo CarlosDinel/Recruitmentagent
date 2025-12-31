@@ -17,7 +17,7 @@ load_dotenv()
 class OpenAIConfig:
     """OpenAI API configuration"""
     api_key: str
-    model: str = "gpt-4"
+    model: str = "gpt-5"
     temperature: float = 0.3
     max_tokens: int = 2000
     
@@ -25,7 +25,7 @@ class OpenAIConfig:
     def from_env(cls) -> 'OpenAIConfig':
         return cls(
             api_key=os.getenv("OPENAI_API_KEY", ""),
-            model=os.getenv("OPENAI_MODEL", "gpt-4"),
+            model=os.getenv("OPENAI_MODEL", "gpt-5"),
             temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.3")),
             max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "2000"))
         )
@@ -144,6 +144,62 @@ class MonitoringConfig:
         )
 
 @dataclass
+class APIConfig:
+    """REST API configuration"""
+    enabled: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8000
+    workers: int = 4
+    reload: bool = False
+    cors_origins: list = None
+    cors_allow_credentials: bool = True
+    cors_allow_methods: list = None
+    cors_allow_headers: list = None
+    api_prefix: str = "/api"
+    docs_url: str = "/docs"
+    redoc_url: str = "/redoc"
+    openapi_url: str = "/openapi.json"
+    
+    def __post_init__(self):
+        """Set default values for list fields"""
+        if self.cors_origins is None:
+            self.cors_origins = ["http://localhost:3000", "http://localhost:8000"]
+        if self.cors_allow_methods is None:
+            self.cors_allow_methods = ["*"]
+        if self.cors_allow_headers is None:
+            self.cors_allow_headers = ["*"]
+    
+    @classmethod
+    def from_env(cls) -> 'APIConfig':
+        # Parse CORS origins from comma-separated string
+        cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8000")
+        cors_origins = [origin.strip() for origin in cors_origins_str.split(",")]
+        
+        # Parse CORS methods from comma-separated string
+        cors_methods_str = os.getenv("CORS_ALLOW_METHODS", "*")
+        cors_methods = [method.strip() for method in cors_methods_str.split(",")] if cors_methods_str != "*" else ["*"]
+        
+        # Parse CORS headers from comma-separated string
+        cors_headers_str = os.getenv("CORS_ALLOW_HEADERS", "*")
+        cors_headers = [header.strip() for header in cors_headers_str.split(",")] if cors_headers_str != "*" else ["*"]
+        
+        return cls(
+            enabled=os.getenv("API_ENABLED", "True").lower() == "true",
+            host=os.getenv("API_HOST", "0.0.0.0"),
+            port=int(os.getenv("API_PORT", "8000")),
+            workers=int(os.getenv("API_WORKERS", "4")),
+            reload=os.getenv("API_RELOAD", "False").lower() == "true",
+            cors_origins=cors_origins,
+            cors_allow_credentials=os.getenv("CORS_ALLOW_CREDENTIALS", "True").lower() == "true",
+            cors_allow_methods=cors_methods,
+            cors_allow_headers=cors_headers,
+            api_prefix=os.getenv("API_PREFIX", "/api"),
+            docs_url=os.getenv("API_DOCS_URL", "/docs"),
+            redoc_url=os.getenv("API_REDOC_URL", "/redoc"),
+            openapi_url=os.getenv("API_OPENAPI_URL", "/openapi.json")
+        )
+
+@dataclass
 class AppConfig:
     """Complete application configuration"""
     debug: bool
@@ -159,6 +215,7 @@ class AppConfig:
     database_agent: DatabaseAgentConfig
     candidate_pipeline: CandidatePipelineConfig
     monitoring: MonitoringConfig
+    api: APIConfig
     
     @classmethod
     def from_env(cls) -> 'AppConfig':
@@ -173,7 +230,8 @@ class AppConfig:
             unified_sourcing=UnifiedSourcingConfig.from_env(),
             database_agent=DatabaseAgentConfig.from_env(),
             candidate_pipeline=CandidatePipelineConfig.from_env(),
-            monitoring=MonitoringConfig.from_env()
+            monitoring=MonitoringConfig.from_env(),
+            api=APIConfig.from_env()
         )
     
     def validate(self) -> bool:
@@ -278,6 +336,16 @@ class AppConfig:
                 "audit_trail_enabled": self.monitoring.audit_trail_enabled,
                 "metrics_collection_enabled": self.monitoring.metrics_collection_enabled,
                 "workflow_logging_level": self.monitoring.workflow_logging_level
+            },
+            "api": {
+                "enabled": self.api.enabled,
+                "host": self.api.host,
+                "port": self.api.port,
+                "workers": self.api.workers,
+                "reload": self.api.reload,
+                "cors_origins": self.api.cors_origins,
+                "api_prefix": self.api.api_prefix,
+                "docs_url": self.api.docs_url
             }
         }
 
@@ -339,6 +407,13 @@ def print_config_summary():
     print(f"   Evaluation: {config_dict['candidate_pipeline']['evaluation_enabled']}")
     print(f"   Enrichment: {config_dict['candidate_pipeline']['enrichment_enabled']}")
     print(f"   Profile Scraping: {config_dict['candidate_pipeline']['profile_scraping_enabled']}")
+    
+    print(f"\n🌐 REST API:")
+    print(f"   Enabled: {config_dict['api']['enabled']}")
+    print(f"   Host: {config_dict['api']['host']}:{config_dict['api']['port']}")
+    print(f"   Workers: {config_dict['api']['workers']}")
+    print(f"   CORS Origins: {', '.join(config_dict['api']['cors_origins'])}")
+    print(f"   Docs: {config_dict['api']['docs_url']}")
     
     print("\n" + "=" * 60)
 

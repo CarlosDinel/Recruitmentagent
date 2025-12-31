@@ -28,12 +28,12 @@ class OpenAIService:
         
         Args:
             api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
-            model: Model name (defaults to OPENAI_MODEL env var or 'gpt-4')
+            model: Model name (defaults to OPENAI_MODEL env var or 'gpt-5')
             temperature: Temperature for generation
             max_tokens: Maximum tokens per request
         """
         self.api_key = api_key or os.getenv('OPENAI_API_KEY')
-        self.model = model or os.getenv('OPENAI_MODEL', 'gpt-4')
+        self.model = model or os.getenv('OPENAI_MODEL', 'gpt-5')
         self.temperature = temperature or float(os.getenv('OPENAI_TEMPERATURE', '0.3'))
         self.max_tokens = max_tokens or int(os.getenv('OPENAI_MAX_TOKENS', '2000'))
         

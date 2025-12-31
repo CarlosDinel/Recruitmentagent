@@ -38,7 +38,7 @@ class LangChainService:
         self.max_tokens = max_tokens
         
         if self.provider == "openai":
-            self.model = model or os.getenv('OPENAI_MODEL', 'gpt-4')
+            self.model = model or os.getenv('OPENAI_MODEL', 'gpt-5')
             api_key = os.getenv('OPENAI_API_KEY')
             if not api_key:
                 raise ValueError("OPENAI_API_KEY is required for OpenAI provider")

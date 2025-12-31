@@ -8,7 +8,21 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from tools.outreach_tools import send_outreach_email
 from agents.database_agent import DatabaseAgent
-from prompts.outreach_manager_prompts import generate_email_prompt
+
+
+def generate_email_prompt(candidate_name: str, position: str, company: str) -> str:
+    """Generate email outreach prompt."""
+    return f"""Write a professional outreach email to {candidate_name} for a {position} role at {company}.
+
+The email should be:
+- Personalized and genuine
+- Professional but friendly in tone
+- Compelling but not pushy
+- Under 150 words
+
+Format as valid JSON:
+{{"subject": "...", "body": "..."}}"""
+
 
 class EmailOutreachAgent:
     """
@@ -16,7 +30,7 @@ class EmailOutreachAgent:
     and records each contact moment in the Database Agent.
     """
 
-    def __init__(self, user_info: Dict[str, Any], ai_model: str = "gpt-4"):
+    def __init__(self, user_info: Dict[str, Any], ai_model: str = "gpt-5"):
         self.user_info = user_info
         self.llm = ChatOpenAI(model_name=ai_model)
         self.db_agent = DatabaseAgent()
